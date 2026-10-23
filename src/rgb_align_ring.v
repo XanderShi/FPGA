@@ -2,7 +2,8 @@
 //  rgb_align_ring.v   彩色原图延迟线 (按像素序号对齐), 块RAM环形缓冲
 //
 //  作用: 把输入端的 RGB565 原图延迟到与"边缘流水线输出"逐像素对齐,
-//        再和二值边缘一起打包写 DDR (彩色叠加 / 分屏显示用)。
+//        同时把中值滤波后的 8bit 灰度延迟到同一时刻。
+//        两者随后一起打包写 DDR，供原图/中值比较和回放使用。
 //
 //  对齐原理 (与时钟延迟、valid 是否连续都无关):
 //    * 写侧: 每个输入像素(in_valid)写一格, 帧首像素(in_sop)记下其地址 base
@@ -16,13 +17,18 @@
 //======================================================================
 module rgb_align_ring #(
 	parameter        AW  = 13,			// 环深 2^AW
-	parameter [31:0] LAG = 7686			// 流水线序号滞后(像素)
+	parameter [31:0] LAG = 7686,		// RGB到最终边缘输出的滞后
+	parameter [31:0] GRAY_LAG = 6405	// 中值灰度到最终边缘输出的滞后
 )(
 	input				clk,
 	// 写侧: 原图输入流
 	input				in_valid,
 	input				in_sop,
 	input		[15:0]	in_rgb,
+	// 写侧: 中值灰度流, 它比原图晚一个中值窗口
+	input				in_gray_valid,
+	input				in_gray_sop,
+	input		[7:0]	in_gray,
 	// 读侧: 边缘流水线输出
 	input				out_valid,
 	input				out_sop,
@@ -33,26 +39,41 @@ module rgb_align_ring #(
 	output	reg			pk_sop   = 1'b0,
 	output	reg			pk_eop   = 1'b0,
 	output	reg			pk_edge  = 1'b0,
-	output	reg	[15:0]	pk_rgb   = 16'd0
+	output	reg	[15:0]	pk_rgb   = 16'd0,
+	output	reg	[7:0]	pk_gray  = 8'd0
 );
-	reg  [15:0]   mem [0:(1<<AW)-1];
-	reg  [AW-1:0] wptr = {AW{1'b0}};
-	reg  [AW-1:0] base = {AW{1'b0}};
-	reg  [AW-1:0] rptr = {AW{1'b0}};
+	reg  [15:0]   rgb_mem  [0:(1<<AW)-1];
+	reg  [7:0]    gray_mem [0:(1<<AW)-1];
+	reg  [AW-1:0] rgb_wptr  = {AW{1'b0}};
+	reg  [AW-1:0] gray_wptr = {AW{1'b0}};
+	reg  [AW-1:0] rgb_base  = {AW{1'b0}};
+	reg  [AW-1:0] gray_base = {AW{1'b0}};
+	reg  [AW-1:0] rgb_rptr  = {AW{1'b0}};
+	reg  [AW-1:0] gray_rptr = {AW{1'b0}};
 
 	always @(posedge clk) begin
 		if (in_valid) begin
-			mem[wptr] <= in_rgb;
-			if (in_sop) base <= wptr;
-			wptr <= wptr + 1'b1;
+			rgb_mem[rgb_wptr] <= in_rgb;
+			if (in_sop) rgb_base <= rgb_wptr;
+			rgb_wptr <= rgb_wptr + 1'b1;
+		end
+		if (in_gray_valid) begin
+			gray_mem[gray_wptr] <= in_gray;
+			if (in_gray_sop) gray_base <= gray_wptr;
+			gray_wptr <= gray_wptr + 1'b1;
 		end
 	end
 
-	wire [AW-1:0] raddr = (out_valid && out_sop) ? (base - LAG[AW-1:0]) : rptr;
+	wire [AW-1:0] rgb_raddr  = (out_valid && out_sop) ? (rgb_base  - LAG[AW-1:0])      : rgb_rptr;
+	wire [AW-1:0] gray_raddr = (out_valid && out_sop) ? (gray_base - GRAY_LAG[AW-1:0]) : gray_rptr;
 
 	always @(posedge clk) begin
-		if (out_valid) rptr <= raddr + 1'b1;
-		pk_rgb   <= mem[raddr];		// 同步读, 推断块RAM
+		if (out_valid) begin
+			rgb_rptr  <= rgb_raddr  + 1'b1;
+			gray_rptr <= gray_raddr + 1'b1;
+		end
+		pk_rgb   <= rgb_mem[rgb_raddr];		// 同步读, 推断块RAM
+		pk_gray  <= gray_mem[gray_raddr];
 		pk_valid <= out_valid;
 		pk_sop   <= out_valid & out_sop;
 		pk_eop   <= out_valid & out_eop;

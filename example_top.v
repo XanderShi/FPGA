@@ -617,7 +617,6 @@ module example_top
 		.cal_pass		(w_ddr3_cal_pass)
 	);
 	
-	assign w_ddr3_bready = 1'b1; 
 	assign shift_sel = 5'b00100; 		//	ddr_tac_clk always use PLLOUT[2]. 
 	
 	
@@ -932,16 +931,17 @@ wire [7:0]  sobel_in_data  = MEDIAN_EN ? med_data  : gray_data;
 //	阈值: 0~2040 (|Gx|+|Gy| 最大 2040), 默认 64, 步长 8
 //	SOBEL_MODE_4DIR: 0=|Gx|+|Gy|(赛题要求) 1=四方向取最大(旧方案,可选)
 //	按键(核心板丝印K1/K2, 低有效, 1.8V bank1A):
-//	  K1 短按 阈值-8, 按住0.5s后每80ms连减
-//	  K2 短按 阈值+8, 按住0.5s后每80ms连加
-//	  K1+K2 同时按 = 切换算法模式, 循环 0 -> 1 -> 2 -> 0, 上电默认 2:
-//	    0 = Sobel 二值边缘
-//	    1 = Canny 边缘                          (高阶挑战4)
-//	    2 = Canny 边缘 + 简易目标识别叠加显示    (高阶挑战4 + 6)
+//	  K1 短按: 实时/冻结模式调阈值-8; 回放模式上一帧
+//	  K2 短按: 实时/冻结模式调阈值+8; 回放模式下一帧
+//	  K1 长按: 冻结/解除冻结; 回放模式返回实时
+//	  K2 长按: 进入/退出100帧回放
 //	  阈值对两种算法都生效: Sobel 用它二值化; Canny 强阈值 = 阈值, 弱阈值 = 阈值/2
 //	sobel_ctrl 在 clk_sys 域, 阈值/模式用 toggle 握手搬到 cmos_pclk 域再给 Sobel/Canny 用
 wire [10:0] sobel_thr_sys;		//clk_sys 域当前阈值
-wire [1:0]  sobel_mode_sys;		//clk_sys 域当前显示模式
+wire [1:0]  sobel_mode_sys;		//算法模式, 固定2=Canny+目标识别
+wire [1:0]  display_mode_sys;	//界面模式 0实时/1冻结/2回放
+wire        replay_prev_sys;
+wire        replay_next_sys;
 wire        sobel_cfg_toggle;	//配置变化标志
 sobel_ctrl #(
 	.THR_DEFAULT(11'd64)		//上电默认阈值: 现场实测按 24 下 K1 最优 -> 256-24*8=64
@@ -952,10 +952,13 @@ sobel_ctrl #(
 	.key2_n     (key2_n         ),
 	.threshold  (sobel_thr_sys  ),
 	.mode       (sobel_mode_sys ),
-	.cfg_toggle (sobel_cfg_toggle)
+	.display_mode(display_mode_sys),
+	.cfg_toggle (sobel_cfg_toggle),
+	.prev_frame (replay_prev_sys),
+	.next_frame (replay_next_sys)
 );
-//	LED 指示: led_o[5:4]=算法模式(0 Sobel/1 Canny/2 Canny+识别), led_o[3:0]=阈值档位(threshold[10:7])
-assign led_o[5:4] = sobel_mode_sys;
+//	LED 指示: led_o[5:4]=界面模式(0实时/1冻结/2回放), led_o[3:0]=阈值档位
+assign led_o[5:4] = display_mode_sys;
 assign led_o[3:0] = sobel_thr_sys[10:7];
 //	配置跨时钟域: clk_sys -> cmos_pclk, 检测到 toggle 翻转才锁存(此时数据已稳定)
 reg        cfg_tog_s1,cfg_tog_s2,cfg_tog_s3;
@@ -980,6 +983,18 @@ wire        sobel_sop, sobel_valid, sobel_eop;
 wire [7:0]  sobel_data;
 wire [7:0]  sobel_gray;		//与sobel_data同延迟的原图灰度(分屏显示用)
 wire [7:0]  sobel_bin;		//二值化边缘(与模式无关, 彩色叠加用)
+	reg  [1:0]  display_mode_meta0, display_mode_meta1, display_mode_frame;
+	reg         display_vs_d;
+	reg  [6:0]  right_meta_slot_frame;
+	always @(posedge clk_pixel or negedge rstn_pixel) begin
+		if (!rstn_pixel) begin
+			display_mode_meta0 <= 2'd0;
+			display_mode_meta1 <= 2'd0;
+		end else begin
+			display_mode_meta0 <= display_mode_sys;
+			display_mode_meta1 <= display_mode_meta0;
+		end
+	end
 Sobeledge_8d_proc #(
 	.WIDTH(1280),
 	.HEIGHT(720),
@@ -1090,14 +1105,19 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 	localparam [31:0] PIPE_LAG = (MEDIAN_EN ? 1281 : 0) + 1281 + (CANNY_EN ? 4*1281 : 0);
 	wire [15:0] rgb_dly;
 	wire        pk_valid, pk_sop, pk_eop, pk_edge;		//打包级: 比 edge_* 晚一拍, 与 rgb_dly 同拍
+	wire [7:0]  pk_gray;		//中值滤波灰度, 与 pk_rgb/pk_edge 同拍
 	rgb_align_ring #(
 		.AW  (13),			//环深 8192 > 7686 + 在途像素
-		.LAG (PIPE_LAG)
+		.LAG (PIPE_LAG),
+		.GRAY_LAG(CANNY_EN ? 5*1281 : 1281)
 	) u_rgb_align_ring (
 		.clk      (w_cmos_pclk),
 		.in_valid (valid_w0   ),
 		.in_sop   (sop_w0     ),
 		.in_rgb   (data_w0    ),
+		.in_gray_valid(sobel_in_valid),
+		.in_gray_sop  (sobel_in_sop),
+		.in_gray      (sobel_in_data),
 		.out_valid(edge_valid ),
 		.out_sop  (edge_sop   ),
 		.out_eop  (edge_eop   ),
@@ -1106,10 +1126,11 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 		.pk_sop   (pk_sop     ),
 		.pk_eop   (pk_eop     ),
 		.pk_edge  (pk_edge    ),
-		.pk_rgb   (rgb_dly    )
+		.pk_rgb   (rgb_dly    ),
+		.pk_gray  (pk_gray    )
 	);
-	//	整帧统一打包(一个像素16bit): {RGB555, 二值边缘标志}
-	//	显示端再用 lcd_xpos 决定左半屏画彩色+红边、右半屏画二值边缘
+	//	写DDR的raw平面(一个像素16bit): {RGB555, 二值边缘标志}
+	//	中值灰度作为同一帧槽内的第二个平面单独写入。
 	//	(不在写侧用列计数器分流, 避免计数器与真实列号对不齐导致画面被切成竖条)
 	wire [15:0] wframe_pack = {rgb_dly[15:11], rgb_dly[10:6], rgb_dly[4:0], pk_edge};
 
@@ -1135,10 +1156,10 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 		.RECT_Q   (16'd230),		//填充率 >= 0.90 -> 矩形
 		.CIRC_Q   (16'd168),		//填充率 >= 0.66 -> 圆形
 		.TRI_Q    (16'd96),			//填充率 >= 0.38 -> 三角形
-		.ROI_X0   (320),			//只统计画面正中 640x480, 排除背景杂波
-		.ROI_X1   (959),
-		.ROI_Y0   (120),
-		.ROI_Y1   (599)
+		.ROI_X0   (400),			//只统计画面正中 480x360, 排除背景杂波
+		.ROI_X1   (879),
+		.ROI_Y0   (180),
+		.ROI_Y1   (539)
 	) u_shape_recognizer (
 		.clk          (w_cmos_pclk  ),
 		.rst_n        (rstn_sys     ),
@@ -1169,16 +1190,36 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 	wire            [7:0]           lcd_blue, lcd_blue2;
 	wire            [15:0]          lcd_data;
 
+	always @(posedge clk_pixel or negedge rstn_pixel) begin
+		if (!rstn_pixel) begin
+			display_vs_d <= 1'b0;
+			display_mode_frame <= 2'd0;
+		end else begin
+			display_vs_d <= ~lcd_vs;
+			if ((~lcd_vs) && !display_vs_d)
+				display_mode_frame <= display_mode_meta1;
+		end
+	end
+
 
 	assign w_ddr3_awid = 0; 
 	assign w_ddr3_wid = 0; 
 	
-	wire 			w_wframe_vsync; 
-	wire 	[7:0] 	w_axi_tp; 
-	
-	//	注意: axi4_ctrl 的读FIFO只支持 8/16bit(C_R_WIDTH=32 时没有对应分支, rframe_data会悬空),
-	//	所以仍用 16bit 字宽, 靠"按列打包"把彩色和边缘都塞进一个像素字里
-	axi4_ctrl #(.C_RD_END_ADDR(1280 * 2 * 720), .C_W_WIDTH(16), .C_R_WIDTH(16), .C_ID_LEN(4)) u_axi4_ctrl (
+	//	100帧环形缓存: raw+edge与中值灰度使用同一4MiB槽内的两个平面。
+	//	冻结/回放期间额外使用槽100/101缓存实时画面，左侧仍保持动态。
+	wire [6:0] frame_live_slot;
+	wire [6:0] frame_freeze_slot;
+	wire [6:0] frame_replay_slot;
+	wire [6:0] frame_ring_count;
+	wire [6:0] frame_write_slot;
+	wire       frame_write_slot_tog;
+	wire       frame_commit;
+
+	frame_ring_ctrl #(
+		.H_ACTIVE(1280),
+		.V_ACTIVE(720),
+		.N_FRAMES(100)
+	) u_frame_ring_ctrl (
 
 		.axi_clk        (w_ddr3_ui_clk            ),
 		.axi_reset      (w_ddr3_ui_rst            ),
@@ -1195,8 +1236,9 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 		.axi_wready     (w_ddr3_wready       ),
 
 		.axi_bid        (0          ),
-		.axi_bresp      (0        ),
-		.axi_bvalid     (1       ),
+		.axi_bresp      (w_ddr3_bresp),
+		.axi_bvalid     (w_ddr3_bvalid),
+		.axi_bready     (w_ddr3_bready),
 
 		.axi_arid       (w_ddr3_arid         ),
 		.axi_araddr     (w_ddr3_araddr       ),
@@ -1211,20 +1253,31 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 		.axi_rvalid     (w_ddr3_rvalid       ),
 		.axi_rready     (w_ddr3_rready       ),
 
-		.wframe_pclk    (w_cmos_pclk          ),
-		.wframe_vsync   (!cmos_frame_vsync     ),//Writter VSync. Flush on rising edge. Connect to EOF. 
-		.wframe_data_en (pk_valid                ),//与 wframe_pack 同拍的输出像素有效
-		//彩色叠加+分屏: 参见上面 wframe_pack 的说明
-		.wframe_data    (wframe_pack),
+		.wframe_clk     (w_cmos_pclk),
+		.wframe_rst     (rst_sys),
+		.wframe_sop     (pk_sop),
+		.wframe_eop     (pk_eop),
+		.wframe_valid   (pk_valid),
+		.wframe_raw     (wframe_pack),
+		.wframe_gray    (pk_gray),
 		
-		.rframe_pclk    (clk_pixel            ),
-		.rframe_vsync   (~lcd_vs             ),		//	Reader VSync. Flush on rising edge. Connect to ~EOF. 
-		.rframe_data_en (lcd_request             ),
-		.rframe_data    (lcd_data           ),
-		
-		.tp_o 		(w_axi_tp)
+		.rframe_clk     (clk_pixel),
+		.rframe_rst     (rst_pixel),
+		.rframe_vsync   (~lcd_vs),
+		.rframe_data_en (lcd_request),
+		.rframe_data    (lcd_data),
+
+		.display_mode   (display_mode_sys),
+		.prev_frame     (replay_prev_sys),
+		.next_frame     (replay_next_sys),
+		.live_slot      (frame_live_slot),
+		.freeze_slot    (frame_freeze_slot),
+		.replay_slot    (frame_replay_slot),
+		.ring_count     (frame_ring_count),
+		.write_slot     (frame_write_slot),
+		.write_slot_toggle(frame_write_slot_tog),
+		.frame_commit   (frame_commit)
 	);
-	//assign led_o[3:0] = w_axi_tp; 		//原:AXI调试指示, 现改为阈值档位指示
 	
 	
 	
@@ -1232,20 +1285,21 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 	////////////////////////////////////////////////////////////////
 	//  LCD Timing Driver
 	wire 	[15:0] 	w_lcd_data_swap = {lcd_data[7:0], lcd_data[15:8]}; 
-	//	分屏显示: 左半屏(x<640) = 原始彩色图 + 红色边缘叠加; 右半屏 = 边缘检测结果
-	//	DDR里一个像素16bit(按列打包): 左半屏 [15:11]=R5 [10:6]=G5 [5:1]=B5 [0]=二值边缘
-	//	                              右半屏 [15:8]=原图灰度 [7:0]=边缘结果
-	//	注: 读 FIFO(R0_FIFO_16)是 FWFT 模式, lcd_request 拉高那一拍数据已在口上,
-	//	    所以 lcd_xpos/lcd_ypos 与 lcd_data 同拍且恰好等于图像列号/行号
+	//	DDR帧格式: [15:11]=R5 [10:6]=G5 [5:1]=B5 [0]=Canny边缘。
+	//	实时模式显示整屏白色边缘; 冻结/回放模式显示左实时彩色、右历史中值灰度,
+	//	两侧均已由帧环读模块按2x2缩放并排好LCD顺序。
 	wire 	[11:0] 	lcd_xpos, lcd_ypos;
-	//	左半屏: RGB555 按高位复制扩展成 RGB888, 边缘标志置1的像素画成红色
 	wire 	[23:0] 	lcd_rgb888 = {lcd_data[15:11], lcd_data[13:11],	// R5 -> R8
 	                              lcd_data[10:6],  lcd_data[8:6],	// G5 -> G8
 	                              lcd_data[5:1],   lcd_data[3:1]};	// B5 -> B8
-	wire 	[23:0] 	lcd_left  = lcd_data[0] ? 24'hFF0000 : lcd_rgb888;
-	//	右半屏: 二值边缘图(白=边缘, 黑=背景)
-	wire 	[23:0] 	lcd_right = lcd_data[0] ? 24'hFFFFFF : 24'h000000;
-	wire 	[23:0] 	lcd_pixel = (lcd_xpos < 12'd640) ? lcd_left : lcd_right;
+	wire 	[23:0] 	lcd_edge  = lcd_data[0] ? 24'hFFFFFF : 24'h000000;
+	wire 	[23:0] 	lcd_color = lcd_data[0] ? 24'hFF0000 : lcd_rgb888;
+	wire 	[23:0] 	lcd_gray  = {lcd_data[7:0],lcd_data[7:0],lcd_data[7:0]};
+	wire 	[23:0] 	lcd_compare = (lcd_xpos < 12'd640) ? lcd_color : lcd_gray;
+	wire 	[23:0] 	lcd_base_pixel = (display_mode_frame == 2'd0) ? lcd_edge : lcd_compare;
+	wire 	[23:0] 	lcd_pixel = (lcd_xpos == 12'd639 || lcd_xpos == 12'd640)
+		? ((display_mode_frame == 2'd0) ? lcd_base_pixel : 24'h808080)
+		: lcd_base_pixel;
 
 	////////////////////////////////////////////////////////////////
 	//	【高阶挑战6】识别结果 跨时钟域(w_cmos_pclk -> clk_pixel) + 屏幕叠加
@@ -1276,9 +1330,81 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 		.ratio_b (disp_ratio  ),
 		.valid_b (disp_svalid )
 	);
-	//	模式2 才显示叠加层: 模式是准静态电平, 两级同步即可
-	reg  [1:0]  ov_en_sync = 2'b00;
-	always @(posedge clk_pixel) ov_en_sync <= {ov_en_sync[0], (sobel_mode_sys == 2'd2)};
+	//	每一帧的结果按物理DDR槽号保存。冻结/回放时读取右半屏对应槽，
+	//	实时模式继续使用最新结果，避免历史画面配错目标框。
+	reg [1:0]  meta_shape [0:101];
+	reg [10:0] meta_x0    [0:101];
+	reg [10:0] meta_x1    [0:101];
+	reg [9:0]  meta_y0    [0:101];
+	reg [9:0]  meta_y1    [0:101];
+	reg        meta_valid [0:101];
+	reg        write_slot_tog_s1, write_slot_tog_s2, write_slot_tog_s3;
+	reg [6:0]  meta_wr_slot;
+	reg [6:0]  freeze_slot_s1, freeze_slot_s2;
+	reg [6:0]  replay_slot_s1, replay_slot_s2;
+	integer mi;
+
+	always @(posedge clk_pixel or negedge rstn_pixel) begin
+		if (!rstn_pixel) begin
+			write_slot_tog_s1 <= 1'b0;
+			write_slot_tog_s2 <= 1'b0;
+			write_slot_tog_s3 <= 1'b0;
+			meta_wr_slot <= 7'd0;
+			freeze_slot_s1 <= 7'd0; freeze_slot_s2 <= 7'd0;
+			replay_slot_s1 <= 7'd0; replay_slot_s2 <= 7'd0;
+			right_meta_slot_frame <= 7'd0;
+			for (mi=0; mi<102; mi=mi+1) begin
+				meta_shape[mi] <= 2'd0;
+				meta_x0[mi] <= 11'd0;
+				meta_x1[mi] <= 11'd0;
+				meta_y0[mi] <= 10'd0;
+				meta_y1[mi] <= 10'd0;
+				meta_valid[mi] <= 1'b0;
+			end
+		end else begin
+			write_slot_tog_s1 <= frame_write_slot_tog;
+			write_slot_tog_s2 <= write_slot_tog_s1;
+			write_slot_tog_s3 <= write_slot_tog_s2;
+			freeze_slot_s1 <= frame_freeze_slot;
+			freeze_slot_s2 <= freeze_slot_s1;
+			replay_slot_s1 <= frame_replay_slot;
+			replay_slot_s2 <= replay_slot_s1;
+			if ((~lcd_vs) && !display_vs_d)
+				right_meta_slot_frame <= (display_mode_meta1 == 2'd2) ?
+					replay_slot_s2 : freeze_slot_s2;
+
+			if (write_slot_tog_s2 ^ write_slot_tog_s3)
+				meta_wr_slot <= frame_write_slot;
+			if (disp_svalid) begin
+				meta_shape[meta_wr_slot] <= disp_shape;
+				meta_x0[meta_wr_slot] <= disp_x0;
+				meta_x1[meta_wr_slot] <= disp_x1;
+				meta_y0[meta_wr_slot] <= disp_y0;
+				meta_y1[meta_wr_slot] <= disp_y1;
+				meta_valid[meta_wr_slot] <= 1'b1;
+			end
+		end
+	end
+
+	wire [6:0] right_meta_slot = right_meta_slot_frame;
+	wire [1:0]  hist_shape = meta_shape[right_meta_slot];
+	wire [10:0] hist_bx0   = meta_x0[right_meta_slot] >> 1;
+	wire [10:0] hist_bx1   = meta_x1[right_meta_slot] >> 1;
+	wire [9:0]  hist_by0   = meta_y0[right_meta_slot] >> 1;
+	wire [9:0]  hist_by1   = meta_y1[right_meta_slot] >> 1;
+	wire        hist_valid = meta_valid[right_meta_slot];
+	wire [11:0] ov_bx0 = (display_mode_frame == 2'd0) ? {1'b0,disp_x0} : {1'b0,hist_bx0};
+	wire [11:0] ov_bx1 = (display_mode_frame == 2'd0) ? {1'b0,disp_x1} : {1'b0,hist_bx1};
+	wire [11:0] ov_by0 = (display_mode_frame == 2'd0) ? {2'b0,disp_y0} : {2'b0,hist_by0};
+	wire [11:0] ov_by1 = (display_mode_frame == 2'd0) ? {2'b0,disp_y1} : {2'b0,hist_by1};
+	wire [1:0]  ov_shape = (display_mode_frame == 2'd0) ? disp_shape : hist_shape;
+	wire        ov_valid = (display_mode_frame == 2'd0) ? disp_svalid : hist_valid;
+	wire [11:0] ov_xpos = (display_mode_frame == 2'd0) ? lcd_xpos : (lcd_xpos - 12'd640);
+	wire [11:0] ov_ypos = (display_mode_frame == 2'd0) ? lcd_ypos : (lcd_ypos - 12'd180);
+	wire        ov_de = lcd_request &&
+		((display_mode_frame == 2'd0) ||
+		 (hist_valid && (lcd_xpos >= 12'd640) &&
+		  (lcd_ypos >= 12'd180) && (lcd_ypos < 12'd540)));
 	wire [23:0] lcd_ov;
 	shape_overlay #(
 		.S         (2),		//文字放大 2 倍, 每个汉字 32x32
@@ -1289,16 +1415,16 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 	) u_shape_overlay (
 		.clk   (clk_pixel   ),
 		.rst_n (rstn_pixel  ),
-		.de    (lcd_request & ov_en_sync[1]),
-		.xpos  (lcd_xpos    ),
-		.ypos  (lcd_ypos    ),
+		.de    (ov_de),
+		.xpos  (ov_xpos     ),
+		.ypos  (ov_ypos     ),
 		.base  (lcd_pixel   ),
-		.shape (disp_shape  ),
-		.bx0   ({1'b0, disp_x0}),
-		.bx1   ({1'b0, disp_x1}),
-		.by0   ({2'b0, disp_y0}),
-		.by1   ({2'b0, disp_y1}),
-		.valid (disp_svalid ),
+		.shape (ov_shape  ),
+		.bx0   (ov_bx0),
+		.bx1   (ov_bx1),
+		.by0   (ov_by0),
+		.by1   (ov_by1),
+		.valid (ov_valid ),
 		.rgb   (lcd_ov      )
 	);
 	wire 	[7:0] 	lcd_data_r = lcd_ov[23:16];

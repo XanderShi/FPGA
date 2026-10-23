@@ -64,12 +64,14 @@ module tb_edge_system;
 		.source_edge(canny_bit), .side_out(sobel_bit));
 	wire edge_bit = (MODE == 0) ? sobel_bit : canny_bit;
 
-	wire pk_valid, pk_sop, pk_eop, pk_edge; wire [15:0] pk_rgb;
-	rgb_align_ring #(.AW(13), .LAG(PIPE_LAG)) u_ring (
+	wire pk_valid, pk_sop, pk_eop, pk_edge; wire [15:0] pk_rgb; wire [7:0] pk_gray;
+	rgb_align_ring #(.AW(13), .LAG(PIPE_LAG), .GRAY_LAG(5*1281)) u_ring (
 		.clk(clk),
 		.in_valid(in_valid), .in_sop(in_sop), .in_rgb(in_rgb),
+		.in_gray_valid(med_valid), .in_gray_sop(med_sop), .in_gray(med_data),
 		.out_valid(edge_valid), .out_sop(edge_sop), .out_eop(edge_eop), .out_edge(edge_bit),
-		.pk_valid(pk_valid), .pk_sop(pk_sop), .pk_eop(pk_eop), .pk_edge(pk_edge), .pk_rgb(pk_rgb));
+		.pk_valid(pk_valid), .pk_sop(pk_sop), .pk_eop(pk_eop), .pk_edge(pk_edge),
+		.pk_rgb(pk_rgb), .pk_gray(pk_gray));
 
 	wire [1:0] shp; wire [10:0] bx0, bx1; wire [9:0] by0, by1;
 	wire [23:0] fe, fa; wire [15:0] fr; wire frv;

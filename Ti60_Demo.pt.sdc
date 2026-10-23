@@ -55,6 +55,10 @@ set_false_path -from [get_clocks clk_pixel] -to [get_clocks clk_sys]
 set_false_path -from [get_clocks clk_sys] -to [get_clocks cmos_pclk]
 set_false_path -from [get_clocks cmos_pclk] -to [get_clocks clk_sys]
 
+# shape_result_cdc uses stable-data + toggle handshake between these clocks.
+set_false_path -from [get_clocks cmos_pclk] -to [get_clocks clk_pixel]
+set_false_path -from [get_clocks clk_pixel] -to [get_clocks cmos_pclk]
+
     
 set_false_path -from [get_clocks dsi_byteclk_i] -to [get_clocks clk_lvds_1x]
 set_false_path -from [get_clocks clk_lvds_1x] -to [get_clocks dsi_byteclk_i]
