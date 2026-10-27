@@ -42,12 +42,12 @@ module shape_recognizer #(
     parameter CIRC_Q   = 16'd168,       // 填充率 >= 168/256 (0.656) -> 圆形
     parameter TRI_Q    = 16'd96,        // 填充率 >=  96/256 (0.375) -> 三角形
 
-    // 感兴趣区域（ROI）：默认取 1280x720 画面正中的 640x480 窗口。
+    // 感兴趣区域（ROI）：默认取 1280x720 画面正中的 480x360 窗口。
     // 只统计 ROI 内的边缘，可有效排除背景杂波对几何特征计算的干扰。
-    parameter ROI_X0   = 320,
-    parameter ROI_X1   = 959,
-    parameter ROI_Y0   = 120,
-    parameter ROI_Y1   = 599
+    parameter ROI_X0   = 400,
+    parameter ROI_X1   = 879,
+    parameter ROI_Y0   = 180,
+    parameter ROI_Y1   = 539
 )(
     input  wire             clk,
     input  wire             rst_n,

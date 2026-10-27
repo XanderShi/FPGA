@@ -1135,10 +1135,10 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 		.RECT_Q   (16'd230),		//填充率 >= 0.90 -> 矩形
 		.CIRC_Q   (16'd168),		//填充率 >= 0.66 -> 圆形
 		.TRI_Q    (16'd96),			//填充率 >= 0.38 -> 三角形
-		.ROI_X0   (320),			//只统计画面正中 640x480, 排除背景杂波
-		.ROI_X1   (959),
-		.ROI_Y0   (120),
-		.ROI_Y1   (599)
+		.ROI_X0   (400),			//只统计画面正中 480x360, 排除背景杂波
+		.ROI_X1   (879),
+		.ROI_Y0   (180),
+		.ROI_Y1   (539)
 	) u_shape_recognizer (
 		.clk          (w_cmos_pclk  ),
 		.rst_n        (rstn_sys     ),

@@ -76,7 +76,7 @@ module tb_edge_system;
 	shape_recognizer #(
 		.H_ACTIVE(W), .V_ACTIVE(H), .XW(11), .YW(10), .CW(24),
 		.MIN_EDGE(24'd400), .RECT_Q(16'd230), .CIRC_Q(16'd168), .TRI_Q(16'd96),
-		.ROI_X0(320), .ROI_X1(959), .ROI_Y0(16), .ROI_Y1(H-17)	// 高度缩小, ROI 相应调整
+		.ROI_X0(400), .ROI_X1(879), .ROI_Y0(16), .ROI_Y1(H-17)	// 宽度 480, 高度随仿真画面缩小
 	) u_shape (
 		.clk(clk), .rst_n(rst_n),
 		.st_sop(pk_sop), .st_eop(pk_eop), .st_valid(pk_valid), .st_data({8{pk_edge}}),

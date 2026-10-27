@@ -4,12 +4,12 @@ $ErrorActionPreference = 'Stop'
 # Reproduces the exact per-frame aggregation: bounding box, per-row run sum,
 # fill ratio and the three threshold comparisons, on synthetic edge images.
 #
-# Run at 640x480 with the ROI scaled to match the 1280x720 defaults so the loop
-# count stays small; the ratio math is resolution independent.
+# Run at 640x480 with the ROI scaled to match the 1280x720 480x360 defaults so
+# the loop count stays small; the ratio math is resolution independent.
 
 $W = 640; $H = 480
-$RX0 = 160; $RX1 = 479      # central half, matches 1280x720 default ROI
-$RY0 = 80;  $RY1 = 399
+$RX0 = 200; $RX1 = 439      # central 480x360 ROI, scaled to 640x480
+$RY0 = 120; $RY1 = 299
 
 $RECT_Q  = 230
 $CIRC_Q  = 168
@@ -27,11 +27,11 @@ function Classify($ratio_q, $edge) {
 # Cases: kind, geometry, stroke thickness in pixels
 $cases = @()
 foreach ($t in 1, 2, 3) {
-  $cases += ,@{ n = "circle r=90 t=$t";  kind = 'circle'; cx = 320; cy = 240; r = 90;   th = $t }
-  $cases += ,@{ n = "circle r=55 t=$t";  kind = 'circle'; cx = 320; cy = 240; r = 55;   th = $t }
-  $cases += ,@{ n = "rect 200x140 t=$t"; kind = 'rect';   cx = 320; cy = 240; hw = 100; hh = 70; th = $t }
-  $cases += ,@{ n = "rect 120x120 t=$t"; kind = 'rect';   cx = 320; cy = 240; hw = 60;  hh = 60; th = $t }
-  $cases += ,@{ n = "tri 200x150 t=$t";  kind = 'tri';    cx = 320; cy = 240; hw = 100; hh = 75; th = $t }
+  $cases += ,@{ n = "circle r=90 t=$t";  kind = 'circle'; cx = 320; cy = 210; r = 90;   th = $t }
+  $cases += ,@{ n = "circle r=55 t=$t";  kind = 'circle'; cx = 320; cy = 210; r = 55;   th = $t }
+  $cases += ,@{ n = "rect 200x140 t=$t"; kind = 'rect';   cx = 320; cy = 210; hw = 100; hh = 70; th = $t }
+  $cases += ,@{ n = "rect 120x120 t=$t"; kind = 'rect';   cx = 320; cy = 210; hw = 60;  hh = 60; th = $t }
+  $cases += ,@{ n = "tri 200x150 t=$t";  kind = 'tri';    cx = 320; cy = 210; hw = 100; hh = 75; th = $t }
 }
 # negative control: scattered noise, no coherent outline
 $cases += ,@{ n = 'noise (no shape)'; kind = 'noise' }
