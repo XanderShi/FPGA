@@ -11,7 +11,7 @@ set SRC=..\src\Sobeledge_8d\hdl
 set GRAY=..\src\vip_rgb2gray\hdl
 
 vlib work
-vlog -work work +incdir+..\src %SRC%\shift_regs.v %SRC%\extract_region_c_shiftram_xtap.v %SRC%\Sobeledge_matrix_3x3.v %SRC%\Sobeledge_proc.v ..\src\sobel_ctrl.v ..\src\median_3x3.v ..\src\canny\canny_edge.v ..\src\rgb_align_ring.v ..\src\shape\shape_recognizer.v ..\src\shape\shape_overlay.v ..\src\shape\font_cn_rom.v ..\src\lcd_driver.v %GRAY%\vip_rgb2gray_proc.v %GRAY%\vip_rgb2gray_mult.v %GRAY%\vip_rgb2gray_shift_regs.v %GRAY%\multiplier_unsigned_16x16_pp.v ref\ref_shiftram_xtap.v tb_Sobeledge_8d_proc.v tb_sobel_ctrl.v tb_median_3x3.v tb_linebuf_equiv.v tb_matrix_gap.v tb_pipeline_latency.v tb_canny_edge.v tb_shape_recognizer.v tb_edge_system.v tb_display_overlay.v
+vlog -work work +incdir+..\src %SRC%\shift_regs.v %SRC%\extract_region_c_shiftram_xtap.v %SRC%\Sobeledge_matrix_3x3.v %SRC%\Sobeledge_proc.v ..\src\sobel_ctrl.v ..\src\median_3x3.v ..\src\canny\canny_edge.v ..\src\rgb_align_ring.v ..\src\frame_store.v ..\src\shape\shape_recognizer.v ..\src\shape\shape_overlay.v ..\src\shape\font_cn_rom.v ..\src\lcd_driver.v %GRAY%\vip_rgb2gray_proc.v %GRAY%\vip_rgb2gray_mult.v %GRAY%\vip_rgb2gray_shift_regs.v %GRAY%\multiplier_unsigned_16x16_pp.v ref\ref_shiftram_xtap.v tb_Sobeledge_8d_proc.v tb_sobel_ctrl.v tb_median_3x3.v tb_linebuf_equiv.v tb_matrix_gap.v tb_pipeline_latency.v tb_canny_edge.v tb_shape_recognizer.v tb_edge_system.v tb_display_overlay.v tb_frame_store.v
 
 if errorlevel 1 goto compile_error
 
@@ -39,7 +39,9 @@ echo ===== 9 : system, 1280 wide (slow, several minutes each) =====
 vsim -c -G IMG=0 -do "run -all; quit -f" work.tb_edge_system
 vsim -c -G IMG=1 -G MODE=1 -do "run -all; quit -f" work.tb_edge_system
 vsim -c -G IMG=1 -G MODE=0 -do "run -all; quit -f" work.tb_edge_system
-echo ===== 10 : display overlay (writes overlay.ppm) =====
+echo ===== 10 : frame_store (DDR ring / freeze / replay) =====
+vsim -c -do "run -all; quit -f" work.tb_frame_store
+echo ===== 11 : display overlay (writes overlay.ppm) =====
 vsim -c -do "run -all; quit -f" work.tb_display_overlay
 goto end
 

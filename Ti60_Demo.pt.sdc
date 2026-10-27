@@ -54,6 +54,11 @@ set_false_path -from [get_clocks clk_pixel] -to [get_clocks clk_sys]
 
 set_false_path -from [get_clocks clk_sys] -to [get_clocks cmos_pclk]
 set_false_path -from [get_clocks cmos_pclk] -to [get_clocks clk_sys]
+# cmos_pclk <-> clk_pixel: shape_result_cdc 用 toggle 握手, 数据在切换前已稳定,
+# 属于异步 CDC, 不应按同步路径约束
+set_false_path -from [get_clocks cmos_pclk] -to [get_clocks clk_pixel]
+set_false_path -from [get_clocks clk_pixel] -to [get_clocks cmos_pclk]
+
 
     
 set_false_path -from [get_clocks dsi_byteclk_i] -to [get_clocks clk_lvds_1x]

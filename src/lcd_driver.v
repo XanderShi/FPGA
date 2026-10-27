@@ -69,7 +69,12 @@ module lcd_driver #(
 	output reg			lcd_request,	//lcd data request
 	output reg	[11:0]	lcd_xpos,		//lcd horizontal coordinate
 	output reg	[11:0]	lcd_ypos,		//lcd vertical coordinate
-	input 	[DATA_WIDTH-1:0]	lcd_data		//lcd data
+	input 	[DATA_WIDTH-1:0]	lcd_data,		//lcd data
+
+	//	frame_store 行缓存控制用: 行首/帧首脉冲 + 当前扫描行号(含消隐)
+	output reg			lcd_line_start,	//	hcnt==0 时一拍
+	output reg			lcd_frame_start,//	vcnt==0 && hcnt==0 时一拍
+	output		[11:0]	lcd_vcnt		//	当前垂直计数(0..V_TOTAL-1)
 );	 
 
 /*******************************************
@@ -144,7 +149,12 @@ localparam	H_AHEAD = 	12'd1;
 // lcd xpos & ypos
 	lcd_xpos	<= 	lcd_request ? (hcnt - (H_SYNC + H_BACK - H_AHEAD)) : 11'd0;
 	lcd_ypos	<= 	lcd_request ? (vcnt - (V_SYNC + V_BACK)) : 12'd0;
+
+//	frame_store 行缓存: 行首/帧首脉冲与扫描行号
+	lcd_line_start	<= (hcnt == 13'd0);
+	lcd_frame_start	<= (hcnt == 13'd0) && (vcnt == 12'd0);
 end
+assign lcd_vcnt = vcnt;
 
 
 endmodule

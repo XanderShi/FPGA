@@ -1,5 +1,9 @@
 `timescale 1ns/1ps
 
+//	Efinity 工程文件被 IDE 重写时可能丢掉新加的 design_file 条目,
+//	这里显式 include, 保证 frame_store 一定参与编译
+`include "src/frame_store.v"
+
 //`include "ddr3_controller.vh"
 
 
@@ -617,7 +621,6 @@ module example_top
 		.cal_pass		(w_ddr3_cal_pass)
 	);
 	
-	assign w_ddr3_bready = 1'b1; 
 	assign shift_sel = 5'b00100; 		//	ddr_tac_clk always use PLLOUT[2]. 
 	
 	
@@ -645,9 +648,6 @@ module example_top
 		.aready_i			(w_ddr3_aready)
 	);
 	
-	assign w_ddr3_asize = 4; 		//	Fixed 128 bits (16 bytes, size = 4)
-	assign w_ddr3_aburst = 1; 
-	assign w_ddr3_alock = 0; 
 	
 	//assign led_o[1:0] = {w_ddr3_cal_pass, w_ddr3_cal_done}; 
 	
@@ -940,9 +940,15 @@ wire [7:0]  sobel_in_data  = MEDIAN_EN ? med_data  : gray_data;
 //	    2 = Canny 边缘 + 简易目标识别叠加显示    (高阶挑战4 + 6)
 //	  阈值对两种算法都生效: Sobel 用它二值化; Canny 强阈值 = 阈值, 弱阈值 = 阈值/2
 //	sobel_ctrl 在 clk_sys 域, 阈值/模式用 toggle 握手搬到 cmos_pclk 域再给 Sobel/Canny 用
+//	【高阶挑战3】同一模块还负责: K1 长按冻结 / K2 长按回放 / 回放翻帧
 wire [10:0] sobel_thr_sys;		//clk_sys 域当前阈值
-wire [1:0]  sobel_mode_sys;		//clk_sys 域当前显示模式
+wire [1:0]  sobel_mode_sys;		//clk_sys 域算法模式 0 Sobel / 1 Canny / 2 Canny+识别
 wire        sobel_cfg_toggle;	//配置变化标志
+wire [1:0]  disp_mode_sys;		//0 实时 / 1 冻结 / 2 回放
+wire [6:0]  w_live_slot, w_freeze_slot, w_replay_slot, w_ring_count;
+wire        w_live_valid, w_frame_commit, w_underrun;
+wire        w_freeze_enter, w_replay_enter, w_step_prev, w_step_next;
+wire [6:0]  w_freeze_slot_in;
 sobel_ctrl #(
 	.THR_DEFAULT(11'd64)		//上电默认阈值: 现场实测按 24 下 K1 最优 -> 256-24*8=64
 ) u_sobel_ctrl(
@@ -950,12 +956,21 @@ sobel_ctrl #(
 	.rst_n      (rstn_sys       ),
 	.key1_n     (key1_n         ),
 	.key2_n     (key2_n         ),
+	.live_slot  (w_live_slot    ),
+	.live_valid (w_live_valid   ),
+	.frames_ready(w_live_valid && (w_ring_count != 7'd0)),
 	.threshold  (sobel_thr_sys  ),
 	.mode       (sobel_mode_sys ),
-	.cfg_toggle (sobel_cfg_toggle)
+	.cfg_toggle (sobel_cfg_toggle),
+	.disp_mode  (disp_mode_sys  ),
+	.freeze_enter  (w_freeze_enter  ),
+	.freeze_slot_in(w_freeze_slot_in),
+	.replay_enter  (w_replay_enter  ),
+	.step_prev     (w_step_prev     ),
+	.step_next     (w_step_next     )
 );
-//	LED 指示: led_o[5:4]=算法模式(0 Sobel/1 Canny/2 Canny+识别), led_o[3:0]=阈值档位(threshold[10:7])
-assign led_o[5:4] = sobel_mode_sys;
+//	LED 指示: led_o[5:4]=显示模式(实时/冻结/回放), led_o[3:0]=阈值档位
+assign led_o[5:4] = disp_mode_sys;
 assign led_o[3:0] = sobel_thr_sys[10:7];
 //	配置跨时钟域: clk_sys -> cmos_pclk, 检测到 toggle 翻转才锁存(此时数据已稳定)
 reg        cfg_tog_s1,cfg_tog_s2,cfg_tog_s3;
@@ -1089,15 +1104,20 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 	//	PIPE_LAG: 中值 1281 + Sobel 1281 + Canny 4*1281 = 7686 (rgb2gray 是纯时钟流水线, 序号滞后 0)
 	localparam [31:0] PIPE_LAG = (MEDIAN_EN ? 1281 : 0) + 1281 + (CANNY_EN ? 4*1281 : 0);
 	wire [15:0] rgb_dly;
+	wire [7:0]  gray_dly;
 	wire        pk_valid, pk_sop, pk_eop, pk_edge;		//打包级: 比 edge_* 晚一拍, 与 rgb_dly 同拍
 	rgb_align_ring #(
 		.AW  (13),			//环深 8192 > 7686 + 在途像素
-		.LAG (PIPE_LAG)
+		.LAG (PIPE_LAG),
+		.GRAY_LAG (PIPE_LAG - 1281)		//中值灰度比原图晚一个中值窗口
 	) u_rgb_align_ring (
 		.clk      (w_cmos_pclk),
 		.in_valid (valid_w0   ),
 		.in_sop   (sop_w0     ),
 		.in_rgb   (data_w0    ),
+		.in_gray_valid(med_valid),
+		.in_gray_sop  (med_sop  ),
+		.in_gray      (med_data ),
 		.out_valid(edge_valid ),
 		.out_sop  (edge_sop   ),
 		.out_eop  (edge_eop   ),
@@ -1106,12 +1126,12 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 		.pk_sop   (pk_sop     ),
 		.pk_eop   (pk_eop     ),
 		.pk_edge  (pk_edge    ),
-		.pk_rgb   (rgb_dly    )
+		.pk_rgb   (rgb_dly    ),
+		.pk_gray  (gray_dly   )
 	);
-	//	整帧统一打包(一个像素16bit): {RGB555, 二值边缘标志}
-	//	显示端再用 lcd_xpos 决定左半屏画彩色+红边、右半屏画二值边缘
-	//	(不在写侧用列计数器分流, 避免计数器与真实列号对不齐导致画面被切成竖条)
-	wire [15:0] wframe_pack = {rgb_dly[15:11], rgb_dly[10:6], rgb_dly[4:0], pk_edge};
+	//	整帧统一打包(一个像素32bit): {帧首,帧尾,6'h0,中值灰度, RGB555, 二值边缘}
+	wire [15:0] wraw_pix  = {rgb_dly[15:11], rgb_dly[10:6], rgb_dly[4:0], pk_edge};
+	wire [31:0] wframe_pack = {pk_sop, pk_eop, 6'h00, gray_dly, wraw_pix};
 
 	////////////////////////////////////////////////////////////////
 	//	【高阶挑战6】简易目标识别 (模块: src/shape/, 原作者 梁雅萱, lyx 分支)
@@ -1170,82 +1190,124 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 	wire            [15:0]          lcd_data;
 
 
-	assign w_ddr3_awid = 0; 
 	assign w_ddr3_wid = 0; 
 	
-	wire 			w_wframe_vsync; 
-	wire 	[7:0] 	w_axi_tp; 
+	wire lcd_line_start, lcd_frame_start;
+	wire [11:0] lcd_vcnt;
+	wire [15:0] pix_l, pix_r;
+	wire        pix_valid, pix_split;
 	
-	//	注意: axi4_ctrl 的读FIFO只支持 8/16bit(C_R_WIDTH=32 时没有对应分支, rframe_data会悬空),
-	//	所以仍用 16bit 字宽, 靠"按列打包"把彩色和边缘都塞进一个像素字里
-	axi4_ctrl #(.C_RD_END_ADDR(1280 * 2 * 720), .C_W_WIDTH(16), .C_R_WIDTH(16), .C_ID_LEN(4)) u_axi4_ctrl (
+	//	【高阶挑战3】DDR3 帧存储: 100 帧环 + 3 个实时 scratch 槽,
+	//	显示端按行取数 + 双 bank 行缓存, 冻结/回放时左实时右历史。
+	frame_store #(
+		.H_ACTIVE(1280), .V_ACTIVE(720),
+		.N_RING(100), .N_SCRATCH(3),
+		.SLOT_AW(22),			// 4MiB / slot
+		.W_BURST(128), .R_BURST(16), .RD_OUTSTANDING(4),
+		.V_ACTIVE_START(25)	// 720p: V_SYNC=5 + V_BACK=20
+	) u_frame_store (
+		.axi_awid       (w_ddr3_awid        ),
+		.axi_awaddr     (w_ddr3_awaddr      ),
+		.axi_awlen      (w_ddr3_awlen       ),
+		.axi_awsize     (w_ddr3_asize       ),
+		.axi_awburst    (w_ddr3_aburst      ),
+		.axi_awlock     (w_ddr3_alock       ),
+		.axi_awcache    (),
+		.axi_awprot     (),
+		.axi_awqos      (),
+		.axi_awvalid    (w_ddr3_awvalid     ),
+		.axi_awready    (w_ddr3_awready     ),
 
-		.axi_clk        (w_ddr3_ui_clk            ),
-		.axi_reset      (w_ddr3_ui_rst            ),
+		.axi_wdata      (w_ddr3_wdata       ),
+		.axi_wstrb      (w_ddr3_wstrb       ),
+		.axi_wlast      (w_ddr3_wlast       ),
+		.axi_wvalid     (w_ddr3_wvalid      ),
+		.axi_wready     (w_ddr3_wready      ),
 
-		.axi_awaddr     (w_ddr3_awaddr       ),
-		.axi_awlen      (w_ddr3_awlen        ),
-		.axi_awvalid    (w_ddr3_awvalid      ),
-		.axi_awready    (w_ddr3_awready      ),
+		.axi_bid        (w_ddr3_bid         ),
+		.axi_bresp      (w_ddr3_bresp       ),
+		.axi_bvalid     (w_ddr3_bvalid      ),
+		.axi_bready     (w_ddr3_bready      ),
 
-		.axi_wdata      (w_ddr3_wdata        ),
-		.axi_wstrb      (w_ddr3_wstrb        ),
-		.axi_wlast      (w_ddr3_wlast        ),
-		.axi_wvalid     (w_ddr3_wvalid       ),
-		.axi_wready     (w_ddr3_wready       ),
+		.axi_arid       (w_ddr3_arid        ),
+		.axi_araddr     (w_ddr3_araddr      ),
+		.axi_arlen      (w_ddr3_arlen       ),
+		.axi_arsize     (w_ddr3_asize       ),
+		.axi_arburst    (w_ddr3_aburst      ),
+		.axi_arlock     (w_ddr3_alock       ),
+		.axi_arcache    (),
+		.axi_arprot     (),
+		.axi_arqos      (),
+		.axi_arvalid    (w_ddr3_arvalid     ),
+		.axi_arready    (w_ddr3_arready     ),
 
-		.axi_bid        (0          ),
-		.axi_bresp      (0        ),
-		.axi_bvalid     (1       ),
+		.axi_rid        (w_ddr3_rid         ),
+		.axi_rdata      (w_ddr3_rdata       ),
+		.axi_rresp      (w_ddr3_rresp       ),
+		.axi_rlast      (w_ddr3_rlast       ),
+		.axi_rvalid     (w_ddr3_rvalid      ),
+		.axi_rready     (w_ddr3_rready      ),
 
-		.axi_arid       (w_ddr3_arid         ),
-		.axi_araddr     (w_ddr3_araddr       ),
-		.axi_arlen      (w_ddr3_arlen        ),
-		.axi_arvalid    (w_ddr3_arvalid      ),
-		.axi_arready    (w_ddr3_arready      ),
+		.axi_clk        (w_ddr3_ui_clk      ),
+		.axi_reset      (w_ddr3_ui_rst      ),
+		.ddr_ready      (r_ddr_unlock       ),
 
-		.axi_rid        (w_ddr3_rid          ),
-		.axi_rdata      (w_ddr3_rdata        ),
-		.axi_rresp      (0        ),
-		.axi_rlast      (w_ddr3_rlast        ),
-		.axi_rvalid     (w_ddr3_rvalid       ),
-		.axi_rready     (w_ddr3_rready       ),
+		.wclk           (w_cmos_pclk        ),
+		.wrst           (~rstn_sys          ),
+		.wvalid         (pk_valid           ),
+		.wsop           (pk_sop             ),
+		.weop           (pk_eop             ),
+		.wraw           (wraw_pix           ),
+		.wgray          (gray_dly           ),
 
-		.wframe_pclk    (w_cmos_pclk          ),
-		.wframe_vsync   (!cmos_frame_vsync     ),//Writter VSync. Flush on rising edge. Connect to EOF. 
-		.wframe_data_en (pk_valid                ),//与 wframe_pack 同拍的输出像素有效
-		//彩色叠加+分屏: 参见上面 wframe_pack 的说明
-		.wframe_data    (wframe_pack),
-		
-		.rframe_pclk    (clk_pixel            ),
-		.rframe_vsync   (~lcd_vs             ),		//	Reader VSync. Flush on rising edge. Connect to ~EOF. 
-		.rframe_data_en (lcd_request             ),
-		.rframe_data    (lcd_data           ),
-		
-		.tp_o 		(w_axi_tp)
+		.ctrl_mode      (disp_mode_sys      ),
+		.freeze_enter   (w_freeze_enter     ),
+		.freeze_slot_in (w_freeze_slot_in   ),
+		.replay_enter   (w_replay_enter     ),
+		.step_prev      (w_step_prev        ),
+		.step_next      (w_step_next        ),
+		.live_slot_o    (w_live_slot        ),
+		.freeze_slot_o  (w_freeze_slot      ),
+		.replay_slot_o  (w_replay_slot      ),
+		.ring_count_o   (w_ring_count       ),
+		.live_valid_o   (w_live_valid       ),
+		.frame_commit_o (w_frame_commit     ),
+		.underrun_o     (w_underrun         ),
+
+		.pclk           (clk_pixel          ),
+		.prst           (rst_pixel          ),
+		.lcd_line_start (lcd_line_start     ),
+		.lcd_frame_start(lcd_frame_start    ),
+		.lcd_vcnt       (lcd_vcnt           ),
+		.lcd_request    (lcd_request        ),
+		.lcd_xpos       (lcd_xpos           ),
+		.pix_l          (pix_l              ),
+		.pix_r          (pix_r              ),
+		.pix_valid      (pix_valid          ),
+		.pix_split      (pix_split          )
 	);
-	//assign led_o[3:0] = w_axi_tp; 		//原:AXI调试指示, 现改为阈值档位指示
 	
 	
 	
 	
 	////////////////////////////////////////////////////////////////
 	//  LCD Timing Driver
-	wire 	[15:0] 	w_lcd_data_swap = {lcd_data[7:0], lcd_data[15:8]}; 
-	//	分屏显示: 左半屏(x<640) = 原始彩色图 + 红色边缘叠加; 右半屏 = 边缘检测结果
-	//	DDR里一个像素16bit(按列打包): 左半屏 [15:11]=R5 [10:6]=G5 [5:1]=B5 [0]=二值边缘
-	//	                              右半屏 [15:8]=原图灰度 [7:0]=边缘结果
-	//	注: 读 FIFO(R0_FIFO_16)是 FWFT 模式, lcd_request 拉高那一拍数据已在口上,
-	//	    所以 lcd_xpos/lcd_ypos 与 lcd_data 同拍且恰好等于图像列号/行号
+	//	【高阶挑战3】显示合成:
+	//	  实时模式 : 整屏 Canny 二值边缘 + 目标框/标签 (LIVE_COLOR=1 则彩色+红边)
+	//	  冻结/回放: 左 640 列 = 实时彩色+红边, 右 640 列 = 冻结/历史中值灰度
+	//	            两个源都按 2x2 抽样成 640x360, 上下留黑边
+	//	  帧存储 pix_l = {RGB555,edge}, pix_r = {8'h0,median_gray}
 	wire 	[11:0] 	lcd_xpos, lcd_ypos;
-	//	左半屏: RGB555 按高位复制扩展成 RGB888, 边缘标志置1的像素画成红色
-	wire 	[23:0] 	lcd_rgb888 = {lcd_data[15:11], lcd_data[13:11],	// R5 -> R8
-	                              lcd_data[10:6],  lcd_data[8:6],	// G5 -> G8
-	                              lcd_data[5:1],   lcd_data[3:1]};	// B5 -> B8
-	wire 	[23:0] 	lcd_left  = lcd_data[0] ? 24'hFF0000 : lcd_rgb888;
-	//	右半屏: 二值边缘图(白=边缘, 黑=背景)
-	wire 	[23:0] 	lcd_right = lcd_data[0] ? 24'hFFFFFF : 24'h000000;
-	wire 	[23:0] 	lcd_pixel = (lcd_xpos < 12'd640) ? lcd_left : lcd_right;
+	localparam LIVE_COLOR = 1'b0;
+	wire 	[23:0] 	lcd_rgb888 = {pix_l[15:11], pix_l[13:11],	// R5 -> R8
+	                              pix_l[10:6],  pix_l[8:6],	// G5 -> G8
+	                              pix_l[5:1],   pix_l[3:1]};	// B5 -> B8
+	wire 	[23:0] 	lcd_live_col = pix_l[0] ? 24'hFF0000 : lcd_rgb888;
+	wire 	[23:0] 	lcd_live_bin = pix_l[0] ? 24'hFFFFFF : 24'h000000;
+	wire 	[23:0] 	lcd_split_r  = {pix_r[7:0], pix_r[7:0], pix_r[7:0]};
+	wire 	[23:0] 	lcd_pixel = !pix_valid ? 24'h000000 :
+	                           (pix_split ? ((lcd_xpos < 12'd640) ? lcd_live_col : lcd_split_r)
+	                                      : (LIVE_COLOR ? lcd_live_col : lcd_live_bin));
 
 	////////////////////////////////////////////////////////////////
 	//	【高阶挑战6】识别结果 跨时钟域(w_cmos_pclk -> clk_pixel) + 屏幕叠加
@@ -1276,9 +1338,12 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 		.ratio_b (disp_ratio  ),
 		.valid_b (disp_svalid )
 	);
-	//	模式2 才显示叠加层: 模式是准静态电平, 两级同步即可
+	//	模式2 且实时显示才叠加目标框/标签: 模式是准静态电平, 两级同步即可
 	reg  [1:0]  ov_en_sync = 2'b00;
+	reg  [1:0]  live_sync  = 2'b00;
 	always @(posedge clk_pixel) ov_en_sync <= {ov_en_sync[0], (sobel_mode_sys == 2'd2)};
+	always @(posedge clk_pixel) live_sync  <= {live_sync[0],  (disp_mode_sys   == 2'd0)};
+	wire        ov_en = ov_en_sync[1] & live_sync[1];
 	wire [23:0] lcd_ov;
 	shape_overlay #(
 		.S         (2),		//文字放大 2 倍, 每个汉字 32x32
@@ -1289,7 +1354,7 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 	) u_shape_overlay (
 		.clk   (clk_pixel   ),
 		.rst_n (rstn_pixel  ),
-		.de    (lcd_request & ov_en_sync[1]),
+		.de    (lcd_request & ov_en),
 		.xpos  (lcd_xpos    ),
 		.ypos  (lcd_ypos    ),
 		.base  (lcd_pixel   ),
@@ -1322,6 +1387,9 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 	    .lcd_rgb    ({lcd_red2,lcd_green2,lcd_blue2, lcd_red,lcd_green,lcd_blue}),
 	    .lcd_xpos   (lcd_xpos),	//	用于分屏判断左右半屏 / 叠加层定位
 	    .lcd_ypos   (lcd_ypos),	//	叠加层定位
+	    .lcd_line_start (lcd_line_start),
+	    .lcd_frame_start(lcd_frame_start),
+	    .lcd_vcnt       (lcd_vcnt       ),
 	    
 	    //  user interface
 	    .lcd_data   ({lcd_data_r, lcd_data_g, lcd_data_b}  )
