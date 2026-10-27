@@ -88,7 +88,7 @@ module sobel_ctrl #(
 // 单键: 按下沿 / 松开沿 / 长按 0.8s 一次性触发
 //----------------------------------------------------------------------
 	reg p1_d, p2_d;
-	reg [25:0] hold1, hold2;
+	reg [26:0] hold1, hold2;	// 96MHz*0.8s=76.8M > 2^26, 必须 27 位
 	reg long1_done, long2_done;
 	reg combo1_seen, combo2_seen;
 	reg long1, long2, short1, short2;
@@ -96,7 +96,7 @@ module sobel_ctrl #(
 	always @(posedge clk or negedge rst_n) begin
 		if(!rst_n) begin
 			p1_d<=1'b0; p2_d<=1'b0;
-			hold1<=26'd0; hold2<=26'd0;
+			hold1<=27'd0; hold2<=27'd0;
 			long1_done<=1'b0; long2_done<=1'b0;
 			combo1_seen<=1'b0; combo2_seen<=1'b0;
 			long1<=1'b0; long2<=1'b0; short1<=1'b0; short2<=1'b0;
@@ -106,10 +106,10 @@ module sobel_ctrl #(
 
 			//---- K1 ----
 			if(p1 & ~p1_d) begin
-				hold1<=26'd0; long1_done<=1'b0; combo1_seen<=1'b0;
+				hold1<=27'd0; long1_done<=1'b0; combo1_seen<=1'b0;
 			end else if(p1) begin
 				if(both) begin
-					combo1_seen<=1'b1; hold1<=26'd0;
+					combo1_seen<=1'b1; hold1<=27'd0;
 				end else if(!long1_done && !combo1_seen) begin
 					if(hold1 >= CNT_LONG-1) begin
 						long1<=1'b1; long1_done<=1'b1;
@@ -122,10 +122,10 @@ module sobel_ctrl #(
 
 			//---- K2 ----
 			if(p2 & ~p2_d) begin
-				hold2<=26'd0; long2_done<=1'b0; combo2_seen<=1'b0;
+				hold2<=27'd0; long2_done<=1'b0; combo2_seen<=1'b0;
 			end else if(p2) begin
 				if(both) begin
-					combo2_seen<=1'b1; hold2<=26'd0;
+					combo2_seen<=1'b1; hold2<=27'd0;
 				end else if(!long2_done && !combo2_seen) begin
 					if(hold2 >= CNT_LONG-1) begin
 						long2<=1'b1; long2_done<=1'b1;

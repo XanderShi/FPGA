@@ -1293,12 +1293,13 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 	////////////////////////////////////////////////////////////////
 	//  LCD Timing Driver
 	//	【高阶挑战3】显示合成:
-	//	  实时模式 : 整屏 Canny 二值边缘 + 目标框/标签 (LIVE_COLOR=1 则彩色+红边)
-	//	  冻结/回放: 左 640 列 = 实时彩色+红边, 右 640 列 = 冻结/历史中值灰度
-	//	            两个源都按 2x2 抽样成 640x360, 上下留黑边
+	//	  实时模式 : 左 640 列 = 彩色原图+红色 Canny 边缘 + 目标框/标签,
+	//	             右 640 列 = Canny 二值边缘 (与旧版默认一致)
+	//	  冻结/回放: 左 640 列 = 实时彩色+红边, 右 640 列 = 冻结/历史中值灰度,
+	//	             两个源都按 2x2 抽样成 640x360, 上下留黑边
 	//	  帧存储 pix_l = {RGB555,edge}, pix_r = {8'h0,median_gray}
 	wire 	[11:0] 	lcd_xpos, lcd_ypos;
-	localparam LIVE_COLOR = 1'b0;
+	localparam LIVE_SPLIT = 1'b1;		//1=实时左右分屏(左彩色+红边/右二值)  0=整屏二值
 	wire 	[23:0] 	lcd_rgb888 = {pix_l[15:11], pix_l[13:11],	// R5 -> R8
 	                              pix_l[10:6],  pix_l[8:6],	// G5 -> G8
 	                              pix_l[5:1],   pix_l[3:1]};	// B5 -> B8
@@ -1307,7 +1308,8 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 	wire 	[23:0] 	lcd_split_r  = {pix_r[7:0], pix_r[7:0], pix_r[7:0]};
 	wire 	[23:0] 	lcd_pixel = !pix_valid ? 24'h000000 :
 	                           (pix_split ? ((lcd_xpos < 12'd640) ? lcd_live_col : lcd_split_r)
-	                                      : (LIVE_COLOR ? lcd_live_col : lcd_live_bin));
+	                                      : ((LIVE_SPLIT && (lcd_xpos < 12'd640)) ? lcd_live_col
+	                                                                              : lcd_live_bin));
 
 	////////////////////////////////////////////////////////////////
 	//	【高阶挑战6】识别结果 跨时钟域(w_cmos_pclk -> clk_pixel) + 屏幕叠加
