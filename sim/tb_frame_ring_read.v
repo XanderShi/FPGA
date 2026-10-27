@@ -45,13 +45,13 @@ reg rlast = 0;
 reg rvalid = 0;
 wire rready;
 
-reg [15:0] rd_data;
+wire [15:0] rd_data;
 reg rd_en = 1'b0;
 reg rvsync = 1'b0;
 reg [1:0] mode = 2'd1;
 reg prev_pulse = 0, next_pulse = 0;
 wire [6:0] live_slot, freeze_slot, replay_slot, ring_count, write_slot;
-wire write_slot_tog, commit;
+wire write_slot_tog, commit, live_valid_dut;
 
 integer errors = 0;
 integer ar_count = 0;
@@ -148,6 +148,7 @@ frame_ring_ctrl #(
 	.rframe_vsync(rvsync),
 	.rframe_data_en(rd_en),
 	.rframe_data(rd_data),
+	.rframe_data_valid(),
 	.display_mode(mode),
 	.prev_frame(prev_pulse),
 	.next_frame(next_pulse),
@@ -157,7 +158,10 @@ frame_ring_ctrl #(
 	.ring_count(ring_count),
 	.write_slot(write_slot),
 	.write_slot_toggle(write_slot_tog),
-	.frame_commit(commit)
+	.frame_commit(commit),
+	.live_valid(live_valid_dut),
+	.read_debug(),
+	.out_data_seen()
 );
 
 task check(input integer cond, input [8*80:1] name);

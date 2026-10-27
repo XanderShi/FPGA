@@ -151,9 +151,15 @@ module tb_edge_system;
 	integer fo = -1, n = 0, src, sx, sy, ddx, ddy, nb;
 	integer rgb_err = 0, rgb_chk = 0, edge_cnt = 0, edge_bad = 0, frame_err = 0;
 	integer nres = 0, shape_err = 0;
+	integer sob_edge_cnt = 0, canny_edge_cnt = 0, gray_high_cnt = 0;
 	reg     near_change, near_noise;
 	integer edge_noise = 0;
 	reg [15:0] expv;
+	always @(posedge clk) if (rst_n) begin
+		if (sobel_valid && sobel_bin[7]) sob_edge_cnt = sob_edge_cnt + 1;
+		if (edge_valid && canny_bit) canny_edge_cnt = canny_edge_cnt + 1;
+		if (gray_valid && (gray_data >= 8'd128)) gray_high_cnt = gray_high_cnt + 1;
+	end
 	always @(posedge clk) if (rst_n && pk_valid) begin
 		if (pk_sop) begin
 			if (fo >= 0 && n != N) begin frame_err = frame_err + 1; $display("  [FAIL] out frame %0d: %0d pixels", fo, n); end
@@ -216,6 +222,8 @@ module tb_edge_system;
 			$display("  frame structure errors : %0d", frame_err);
 			$display("  rgb alignment          : %0d checked, %0d errors", rgb_chk, rgb_err);
 			if (IMG == 1) begin
+				$display("  upstream edges         : sobel=%0d canny=%0d, bright-gray pixels=%0d",
+					sob_edge_cnt, canny_edge_cnt, gray_high_cnt);
 				$display("  edge pixels            : %0d, noise residue: %0d, not on object boundary: %0d", edge_cnt, edge_noise, edge_bad);
 				$display("  shape errors           : %0d", shape_err);
 			end

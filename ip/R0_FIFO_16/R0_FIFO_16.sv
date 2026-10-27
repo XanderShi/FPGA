@@ -63,8 +63,8 @@ module R0_FIFO_16
     output rst_busy,
     output [15:0] rdata,
     input a_rst_i,
-    output [9:0] wr_datacount_o,
-    output [12:0] rd_datacount_o,
+    output [10:0] wr_datacount_o,
+    output [13:0] rd_datacount_o,
     output underflow_o,
     output overflow_o
 );
@@ -83,7 +83,7 @@ module R0_FIFO_16
     .PROG_EMPTY_NEGATE (3),
     .OPTIONAL_FLAGS (1),
     .PIPELINE_REG (1),
-    .DEPTH (512),
+    .DEPTH (2048),
     .FAMILY ("TITANIUM"),
     .ASYM_WIDTH_RATIO (1),
     .BYPASS_RESET_SYNC (0),

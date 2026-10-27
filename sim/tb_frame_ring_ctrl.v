@@ -7,61 +7,75 @@
 module W0_FIFO_16 (
 	output reg prog_full_o,
 	output wire full_o,
-	output reg empty_o,
-	output reg prog_empty_o,
+	output wire empty_o,
+	output wire prog_empty_o,
 	input wr_clk_i,
 	input rd_clk_i,
 	input wr_en_i,
 	input rd_en_i,
 	input [15:0] wdata,
 	output wire rst_busy,
-	output reg [127:0] rdata,
+	output wire [127:0] rdata,
 	input a_rst_i,
-	output reg [12:0] wr_datacount_o,
+	output wire [12:0] wr_datacount_o,
 	output wire [9:0] rd_datacount_o,
 	output wire underflow_o,
 	output wire overflow_o
 );
-	reg [15:0] mem [0:65535];
+	// One complete 1280x720 frame is 115200 packed beats.
+	reg [127:0] packet_mem [0:131071];
+	reg [127:0] packet_build;
+	reg [2:0] packet_words;
 	integer wp, rp;
 	assign full_o = 1'b0;
 	assign rst_busy = 1'b0;
-	assign rd_datacount_o = 10'd0;
+	assign rd_datacount_o = wp-rp;
 	assign underflow_o = 1'b0;
 	assign overflow_o = 1'b0;
+	assign empty_o = (wp == rp);
+	assign prog_empty_o = (wp == rp);
+	assign wr_datacount_o = wp-rp;
+	assign rdata = packet_mem[rp];
+
+	wire [127:0] packet_merged = packet_build |
+		({{112{1'b0}},wdata} << (packet_words*16));
 
 	always @(posedge wr_clk_i) begin
 		if (a_rst_i) begin
 			wp = 0; rp = 0;
+			packet_words = 0;
+			packet_build = 128'd0;
 			prog_full_o = 1'b0;
-			empty_o = 1'b1;
-			prog_empty_o = 1'b1;
-			wr_datacount_o = 13'd0;
-			rdata = 128'd0;
 		end else begin
 			if (wr_en_i) begin
-				mem[wp] = wdata;
-				wp = wp + 1;
+				if (packet_words == 7) begin
+					packet_mem[wp] = packet_merged;
+					wp = wp + 1;
+					packet_words = 0;
+					packet_build = 128'd0;
+				end else begin
+					packet_build = packet_merged;
+					packet_words = packet_words + 1;
+				end
 			end
-			if (rd_en_i && ((wp-rp) >= 8))
-				rp = rp + 8;
-			empty_o = (wp == rp);
-			prog_empty_o = ((wp-rp) < 8);
-			wr_datacount_o = wp-rp;
-			{rdata[127:112],rdata[111:96],rdata[95:80],rdata[79:64],
-			 rdata[63:48],rdata[47:32],rdata[31:16],rdata[15:0]} =
-				{mem[rp+7],mem[rp+6],mem[rp+5],mem[rp+4],
-				 mem[rp+3],mem[rp+2],mem[rp+1],mem[rp]};
+		end
+	end
+
+	always @(posedge rd_clk_i) begin
+		if (a_rst_i) begin
+			rp = 0;
+		end else if (rd_en_i && (wp != rp)) begin
+			rp = rp + 1;
 		end
 	end
 endmodule
 
 module R0_FIFO_16 (
 	output wire almost_full_o,
-	output reg prog_full_o,
+	output wire prog_full_o,
 	output wire full_o,
 	output wire wr_ack_o,
-	output reg empty_o,
+	output wire empty_o,
 	output wire almost_empty_o,
 	output wire rd_valid_o,
 	input wr_clk_i,
@@ -70,7 +84,7 @@ module R0_FIFO_16 (
 	input rd_en_i,
 	input [127:0] wdata,
 	output wire rst_busy,
-	output reg [15:0] rdata,
+	output wire [15:0] rdata,
 	input a_rst_i,
 	output wire [9:0] wr_datacount_o,
 	output wire [12:0] rd_datacount_o,
@@ -89,13 +103,13 @@ module R0_FIFO_16 (
 	assign rd_datacount_o = 13'd0;
 	assign underflow_o = 1'b0;
 	assign overflow_o = 1'b0;
+	assign empty_o = (wp == rp);
+	assign prog_full_o = ((wp-rp) > 2048);
+	assign rdata = mem[rp];
 
 	always @(posedge wr_clk_i) begin
 		if (a_rst_i) begin
 			wp = 0; rp = 0;
-			prog_full_o = 1'b0;
-			empty_o = 1'b1;
-			rdata = 16'd0;
 		end else begin
 			if (wr_en_i) begin
 				{mem[wp+7],mem[wp+6],mem[wp+5],mem[wp+4],
@@ -103,11 +117,8 @@ module R0_FIFO_16 (
 				wp = wp + 8;
 			end
 			if (rd_en_i && (rp != wp)) begin
-				rdata = mem[rp];
 				rp = rp + 1;
 			end
-			empty_o = (wp == rp);
-			prog_full_o = ((wp-rp) > 2048);
 		end
 	end
 endmodule
@@ -134,7 +145,7 @@ reg        rd_en;
 
 wire [15:0] rdata;
 wire [6:0] live_slot, freeze_slot, replay_slot, ring_count, write_slot;
-wire write_slot_tog, commit;
+wire write_slot_tog, commit, live_valid_dut;
 
 wire [31:0] awaddr;
 wire [7:0] awlen;
@@ -167,13 +178,32 @@ wire rready;
 
 integer errors = 0;
 reg [2:0] bdelay = 0;
+integer wlast_count = 0;
+integer bdone_count = 0;
+integer valid_count = 0;
+integer wdata_count = 0;
+integer raw_ren_count = 0;
+integer med_ren_count = 0;
+reg suppress_bvalid = 1'b0;
 
 always @(posedge clk) begin
-	if (wvalid && wready && wlast)
+	if (w_valid)
+		valid_count = valid_count + 1;
+	if (wvalid && wready && wlast) begin
 		bdelay <= 3'd2;
-	else if (bdelay != 0)
+		wlast_count = wlast_count + 1;
+	end else if (bdelay != 0) begin
 		bdelay <= bdelay - 1'b1;
-	bvalid <= (bdelay == 3'd1);
+	end
+	bvalid <= !suppress_bvalid && (bdelay == 3'd1);
+	if (bvalid && bready)
+		bdone_count = bdone_count + 1;
+	if (wvalid && wready)
+		wdata_count = wdata_count + 1;
+	if (dut.raw_fifo_ren)
+		raw_ren_count = raw_ren_count + 1;
+	if (dut.med_fifo_ren)
+		med_ren_count = med_ren_count + 1;
 end
 
 frame_ring_ctrl #(
@@ -236,6 +266,7 @@ frame_ring_ctrl #(
 	.rframe_vsync(rvsync),
 	.rframe_data_en(rd_en),
 	.rframe_data(rdata),
+	.rframe_data_valid(),
 	.display_mode(mode),
 	.prev_frame(prev_pulse),
 	.next_frame(next_pulse),
@@ -245,7 +276,10 @@ frame_ring_ctrl #(
 	.ring_count(ring_count),
 	.write_slot(write_slot),
 	.write_slot_toggle(write_slot_tog),
-	.frame_commit(commit)
+	.frame_commit(commit),
+	.live_valid(live_valid_dut),
+	.read_debug(),
+	.out_data_seen()
 );
 
 task send_frame(input [15:0] tag);
@@ -282,6 +316,20 @@ begin
 end
 endtask
 
+task wait_for_missing_b_response;
+	integer n;
+begin
+	n = 0;
+	while (!dut.wr_outstanding && (n < 2000)) begin
+		@(posedge clk);
+		n = n + 1;
+	end
+	check(dut.wr_outstanding != 0, "write burst waits for its B response");
+	repeat(5000) @(posedge clk);
+	check(!commit, "missing B response does not publish an invalid frame");
+end
+endtask
+
 task check(input integer cond, input [8*72:1] name);
 begin
 	if (cond)
@@ -311,6 +359,15 @@ initial begin
 		"first live frame recorded in ring slot 0");
 	check((dut.raw_ptr >= NPIX*2) && (dut.med_ptr >= NPIX*2),
 		"raw and median planes both written");
+	$display("   protocol counters: W=%0d WLAST=%0d B=%0d outstanding=%0d",
+		wdata_count, wlast_count, bdone_count, dut.wr_outstanding);
+	$display("   input/progress: valid=%0d raw_ptr=%0d med_ptr=%0d",
+		valid_count, dut.raw_ptr, dut.med_ptr);
+	$display("   fifo pops: raw_ren=%0d med_ren=%0d", raw_ren_count, med_ren_count);
+	check((wlast_count != 0) && (wdata_count == wlast_count) &&
+		(bdone_count == wlast_count) &&
+		(dut.wr_outstanding == 0),
+		"every write burst has WLAST and matching B response");
 
 	send_frame(16'h2000);
 	wait_commit;
@@ -333,6 +390,16 @@ initial begin
 	send_frame(16'h6000); wait_commit;
 	check((ring_count == 4) && (write_slot == 0) && (live_slot == 0),
 		"ring wraps modulo 4 and newest frame replaces slot 0");
+	$display("   final counters: W=%0d WLAST=%0d B=%0d outstanding=%0d",
+		wdata_count, wlast_count, bdone_count, dut.wr_outstanding);
+	check((wlast_count != 0) && (wdata_count == wlast_count) &&
+		(bdone_count == wlast_count) &&
+		(dut.wr_outstanding == 0),
+		"all six test frames completed AXI write responses");
+
+	suppress_bvalid = 1'b1;
+	send_frame(16'h7000);
+	wait_for_missing_b_response;
 
 	$display("==============================================");
 	if (errors == 0)

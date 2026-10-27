@@ -11,18 +11,26 @@ set SRC=..\src\Sobeledge_8d\hdl
 set GRAY=..\src\vip_rgb2gray\hdl
 
 vlib work
-vlog -work work +define+DYC_FRAME_STUB_FIFOS +incdir+..\src %SRC%\shift_regs.v %SRC%\extract_region_c_shiftram_xtap.v %SRC%\Sobeledge_matrix_3x3.v %SRC%\Sobeledge_proc.v ..\src\sobel_ctrl.v ..\src\frame_ring_ctrl.v ..\src\median_3x3.v ..\src\canny\canny_edge.v ..\src\rgb_align_ring.v ..\src\shape\shape_recognizer.v ..\src\shape\shape_overlay.v ..\src\shape\font_cn_rom.v ..\src\lcd_driver.v %GRAY%\vip_rgb2gray_proc.v %GRAY%\vip_rgb2gray_mult.v %GRAY%\vip_rgb2gray_shift_regs.v %GRAY%\multiplier_unsigned_16x16_pp.v ref\ref_shiftram_xtap.v tb_Sobeledge_8d_proc.v tb_sobel_ctrl.v tb_frame_ring_ctrl.v tb_frame_ring_read.v tb_median_3x3.v tb_linebuf_equiv.v tb_matrix_gap.v tb_pipeline_latency.v tb_canny_edge.v tb_shape_recognizer.v tb_edge_system.v tb_display_overlay.v
+vlog -work work +define+DYC_FRAME_STUB_FIFOS +incdir+..\src %SRC%\shift_regs.v %SRC%\extract_region_c_shiftram_xtap.v %SRC%\Sobeledge_matrix_3x3.v %SRC%\Sobeledge_proc.v ..\src\sobel_ctrl.v ..\src\frame_ring_ctrl.v ..\src\median_3x3.v ..\src\canny\canny_edge.v ..\src\rgb_align_ring.v ..\src\shape\shape_recognizer.v ..\src\shape\shape_overlay.v ..\src\shape\font_cn_rom.v ..\src\lcd_driver.v %GRAY%\vip_rgb2gray_proc.v %GRAY%\vip_rgb2gray_mult.v %GRAY%\vip_rgb2gray_shift_regs.v %GRAY%\multiplier_unsigned_16x16_pp.v ref\ref_shiftram_xtap.v tb_Sobeledge_8d_proc.v tb_rgb2gray_probe.v tb_sobel_ctrl.v tb_frame_ring_ctrl.v tb_frame_ring_read.v tb_frame_e2e.v tb_frame_write_stream.v tb_frame_burst32.v tb_median_3x3.v tb_linebuf_equiv.v tb_matrix_gap.v tb_pipeline_latency.v tb_canny_edge.v tb_shape_recognizer.v tb_edge_system.v tb_display_overlay.v
 
 if errorlevel 1 goto compile_error
 
 echo ===== 1 : Sobeledge_8d_proc (algorithm + threshold) =====
 vsim -c -do "run -all; quit -f" work.tb_Sobeledge_8d_proc
+echo ===== 1b : RGB565 to grayscale =====
+vsim -c -do "run -all; quit -f" work.tb_rgb2gray_probe
 echo ===== 2 : sobel_ctrl (keys) =====
 vsim -c -do "run -all; quit -f" work.tb_sobel_ctrl
 echo ===== 2b : frame ring / freeze / replay policy =====
 vsim -c -do "run -all; quit -f" work.tb_frame_ring_ctrl
 echo ===== 2c : dual-source display read order =====
 vsim -c -do "run -all; quit -f" work.tb_frame_ring_read
+echo ===== 2d : frame write -> DDR -> display read =====
+vsim -c -do "run -all; quit -f" work.tb_frame_e2e
+echo ===== 2e : streaming camera frame -> DDR write =====
+vsim -c -do "run -all; quit -f" work.tb_frame_write_stream
+echo ===== 2f : 32-beat DDR read burst =====
+vsim -c -do "run -all; quit -f" work.tb_frame_burst32
 echo ===== 3 : median_3x3 =====
 vsim -c -do "run -all; quit -f" work.tb_median_3x3
 echo ===== 4 : line buffer BRAM vs shift chain =====

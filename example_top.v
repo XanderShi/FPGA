@@ -957,9 +957,6 @@ sobel_ctrl #(
 	.prev_frame (replay_prev_sys),
 	.next_frame (replay_next_sys)
 );
-//	LED 指示: led_o[5:4]=界面模式(0实时/1冻结/2回放), led_o[3:0]=阈值档位
-assign led_o[5:4] = display_mode_sys;
-assign led_o[3:0] = sobel_thr_sys[10:7];
 //	配置跨时钟域: clk_sys -> cmos_pclk, 检测到 toggle 翻转才锁存(此时数据已稳定)
 reg        cfg_tog_s1,cfg_tog_s2,cfg_tog_s3;
 reg [10:0] sobel_thr_pclk;
@@ -1213,12 +1210,32 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 	wire [6:0] frame_ring_count;
 	wire [6:0] frame_write_slot;
 	wire       frame_write_slot_tog;
-	wire       frame_commit;
+	wire       frame_live_valid;
+	wire       frame_data_valid;
+	wire [3:0] frame_write_debug;
+	wire       frame_axi_data_seen;
+	localparam FRAME_COLOR_TEST = 1'b0;
+	reg [11:0] frame_test_x = 12'd0;
+	always @(posedge w_cmos_pclk or negedge rstn_sys) begin
+		if (!rstn_sys)
+			frame_test_x <= 12'd0;
+		else if (pk_sop)
+			frame_test_x <= 12'd0;
+		else if (pk_valid)
+			frame_test_x <= frame_test_x + 1'b1;
+	end
+	wire [15:0] frame_test_raw =
+		(frame_test_x < 12'd320) ? 16'h7C00 :	// red
+		(frame_test_x < 12'd640) ? 16'h03E0 :	// green
+		(frame_test_x < 12'd960) ? 16'h001F :	// blue
+		16'h7FFF;							// white
 
 	frame_ring_ctrl #(
 		.H_ACTIVE(1280),
 		.V_ACTIVE(720),
-		.N_FRAMES(100)
+		.N_FRAMES(100),
+		.R_BURST(32),
+		.W_DATA_WHITE_TEST(0)
 	) u_frame_ring_ctrl (
 
 		.axi_clk        (w_ddr3_ui_clk            ),
@@ -1258,14 +1275,15 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 		.wframe_sop     (pk_sop),
 		.wframe_eop     (pk_eop),
 		.wframe_valid   (pk_valid),
-		.wframe_raw     (wframe_pack),
-		.wframe_gray    (pk_gray),
+		.wframe_raw     (FRAME_COLOR_TEST ? frame_test_raw : wframe_pack),
+		.wframe_gray    (FRAME_COLOR_TEST ? 8'h80 : pk_gray),
 		
 		.rframe_clk     (clk_pixel),
 		.rframe_rst     (rst_pixel),
 		.rframe_vsync   (~lcd_vs),
 		.rframe_data_en (lcd_request),
 		.rframe_data    (lcd_data),
+		.rframe_data_valid(frame_data_valid),
 
 		.display_mode   (display_mode_sys),
 		.prev_frame     (replay_prev_sys),
@@ -1276,8 +1294,13 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 		.ring_count     (frame_ring_count),
 		.write_slot     (frame_write_slot),
 		.write_slot_toggle(frame_write_slot_tog),
-		.frame_commit   (frame_commit)
+		.frame_commit   (),
+		.live_valid     (frame_live_valid),
+		.read_debug     (frame_write_debug),
+		.out_data_seen  (frame_axi_data_seen)
 	);
+	//	LED5..LED4 = display mode, LED3..LED0 = threshold level.
+	assign led_o = ~{display_mode_sys, sobel_thr_sys[10:7]};
 	
 	
 	
@@ -1289,17 +1312,47 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 	//	实时模式显示整屏白色边缘; 冻结/回放模式显示左实时彩色、右历史中值灰度,
 	//	两侧均已由帧环读模块按2x2缩放并排好LCD顺序。
 	wire 	[11:0] 	lcd_xpos, lcd_ypos;
-	wire 	[23:0] 	lcd_rgb888 = {lcd_data[15:11], lcd_data[13:11],	// R5 -> R8
-	                              lcd_data[10:6],  lcd_data[8:6],	// G5 -> G8
-	                              lcd_data[5:1],   lcd_data[3:1]};	// B5 -> B8
-	wire 	[23:0] 	lcd_edge  = lcd_data[0] ? 24'hFFFFFF : 24'h000000;
-	wire 	[23:0] 	lcd_color = lcd_data[0] ? 24'hFF0000 : lcd_rgb888;
-	wire 	[23:0] 	lcd_gray  = {lcd_data[7:0],lcd_data[7:0],lcd_data[7:0]};
+	// Temporary diagnostic: bypass the FIFO-empty mask so R0 data can be
+	// distinguished from an incorrect empty/valid flag.
+	wire [15:0] lcd_data_safe = lcd_data;
+	wire 	[23:0] 	lcd_rgb888_raw = {lcd_data[15:11], lcd_data[13:11],
+	                              lcd_data[10:6],  lcd_data[8:6],
+	                              lcd_data[5:1],   lcd_data[3:1]};
+	wire 	[23:0] 	lcd_rgb888 = {lcd_data_safe[15:11], lcd_data_safe[13:11],	// R5 -> R8
+	                              lcd_data_safe[10:6],  lcd_data_safe[8:6],	// G5 -> G8
+	                              lcd_data_safe[5:1],   lcd_data_safe[3:1]};	// B5 -> B8
+	wire 	[23:0] 	lcd_edge  = lcd_data_safe[0] ? 24'hFFFFFF : 24'h000000;
+	wire 	[23:0] 	lcd_color = lcd_data_safe[0] ? 24'hFF0000 : lcd_rgb888;
+	wire 	[23:0] 	lcd_gray  = {lcd_data_safe[7:0],lcd_data_safe[7:0],lcd_data_safe[7:0]};
 	wire 	[23:0] 	lcd_compare = (lcd_xpos < 12'd640) ? lcd_color : lcd_gray;
-	wire 	[23:0] 	lcd_base_pixel = (display_mode_frame == 2'd0) ? lcd_edge : lcd_compare;
+	localparam LCD_RAW_TEST = 1'b0;
+	//	Temporary diagnosis: show each DDR RGB555 bit-group as a visible
+	//	fallback color. This distinguishes zero data from a channel/order error.
+	localparam LCD_DATA_BRIDGE_TEST = 1'b0;
+	wire [23:0] lcd_data_bridge =
+		(lcd_xpos < 12'd320) ? ((lcd_data_safe[15:1] != 15'd0) ? 24'hFFFFFF : 24'h000000) :
+		(lcd_xpos < 12'd640) ? ((lcd_data_safe[15:11] != 5'd0) ? 24'hFF0000 : 24'h0000FF) :
+		(lcd_xpos < 12'd960) ? ((lcd_data_safe[10:6]  != 5'd0) ? 24'h00FF00 : 24'hFF00FF) :
+		                       ((lcd_data_safe[5:1]   != 5'd0) ? 24'h0000FF : 24'hFFFF00);
+	//	Temporary diagnosis: bypass edge coloring to verify raw DDR RGB order.
+	localparam LCD_TWO_PATH_TEST = 1'b0;
+	wire [23:0] lcd_two_path =
+		(lcd_xpos < 12'd640) ? lcd_rgb888_raw :
+		(frame_data_valid ? 24'h00FF00 : 24'hFF0000);
+	wire 	[23:0] 	lcd_base_pixel = LCD_TWO_PATH_TEST ? lcd_two_path :
+		(LCD_DATA_BRIDGE_TEST ? lcd_data_bridge :
+		((display_mode_frame == 2'd0) ?
+			((LCD_RAW_TEST) ? lcd_rgb888 : lcd_color) : lcd_compare));
+	localparam LCD_LOCAL_TEST = 1'b0;
+	wire [23:0] lcd_local_test =
+		(lcd_xpos < 12'd320) ? 24'hFF0000 :
+		(lcd_xpos < 12'd640) ? 24'h00FF00 :
+		(lcd_xpos < 12'd960) ? 24'h0000FF :
+		24'hFFFFFF;
+	wire [23:0] lcd_source_pixel = LCD_LOCAL_TEST ? lcd_local_test : lcd_base_pixel;
 	wire 	[23:0] 	lcd_pixel = (lcd_xpos == 12'd639 || lcd_xpos == 12'd640)
-		? ((display_mode_frame == 2'd0) ? lcd_base_pixel : 24'h808080)
-		: lcd_base_pixel;
+		? ((display_mode_frame == 2'd0) ? lcd_source_pixel : 24'h808080)
+		: lcd_source_pixel;
 
 	////////////////////////////////////////////////////////////////
 	//	【高阶挑战6】识别结果 跨时钟域(w_cmos_pclk -> clk_pixel) + 屏幕叠加
@@ -1427,9 +1480,85 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 		.valid (ov_valid ),
 		.rgb   (lcd_ov      )
 	);
-	wire 	[7:0] 	lcd_data_r = lcd_ov[23:16];
-	wire 	[7:0] 	lcd_data_g = lcd_ov[15:8];
-	wire 	[7:0] 	lcd_data_b = lcd_ov[7:0];
+	//	Temporary hardware discriminator. Remove after reporting these states.
+	localparam LCD_STATUS_DIAG = 1'b0;
+	reg frame_live_valid_s1, frame_live_valid_s2;
+	reg diag_frame_underflow, diag_seen_edge, diag_seen_nonzero;
+	reg [3:0] frame_write_debug_s1, frame_write_debug_s2;
+	reg ddr_cal_done_s1, ddr_cal_done_s2, ddr_cal_pass_s1, ddr_cal_pass_s2;
+	reg frame_axi_data_seen_s1, frame_axi_data_seen_s2;
+	always @(posedge clk_pixel or negedge rstn_pixel) begin
+		if (!rstn_pixel) begin
+			frame_live_valid_s1 <= 1'b0;
+			frame_live_valid_s2 <= 1'b0;
+			diag_frame_underflow <= 1'b0;
+			diag_seen_edge <= 1'b0;
+			diag_seen_nonzero <= 1'b0;
+			frame_write_debug_s1 <= 4'd0;
+			frame_write_debug_s2 <= 4'd0;
+			ddr_cal_done_s1 <= 1'b0;
+			ddr_cal_done_s2 <= 1'b0;
+			ddr_cal_pass_s1 <= 1'b0;
+			ddr_cal_pass_s2 <= 1'b0;
+			frame_axi_data_seen_s1 <= 1'b0;
+			frame_axi_data_seen_s2 <= 1'b0;
+		end else begin
+			frame_live_valid_s1 <= frame_live_valid;
+			frame_live_valid_s2 <= frame_live_valid_s1;
+			frame_write_debug_s1 <= frame_write_debug;
+			frame_write_debug_s2 <= frame_write_debug_s1;
+			ddr_cal_done_s1 <= w_ddr3_cal_done;
+			ddr_cal_done_s2 <= ddr_cal_done_s1;
+			ddr_cal_pass_s1 <= w_ddr3_cal_pass;
+			ddr_cal_pass_s2 <= ddr_cal_pass_s1;
+			frame_axi_data_seen_s1 <= frame_axi_data_seen;
+			frame_axi_data_seen_s2 <= frame_axi_data_seen_s1;
+			if (lcd_request && (lcd_xpos == 12'd0) && (lcd_ypos == 12'd0)) begin
+				diag_frame_underflow <= 1'b0;
+				diag_seen_edge <= 1'b0;
+				diag_seen_nonzero <= 1'b0;
+			end else if (lcd_request) begin
+				if (!frame_data_valid)
+					diag_frame_underflow <= 1'b1;
+				if (lcd_data[0])
+					diag_seen_edge <= 1'b1;
+				if (lcd_data[15:1] != 15'd0)
+					diag_seen_nonzero <= 1'b1;
+			end
+		end
+	end
+	wire [23:0] lcd_status_diag =
+		!frame_live_valid_s2 ? 24'hFF0000 :
+		diag_frame_underflow ? 24'hFFFF00 :
+		!diag_seen_edge      ? 24'h0000FF :
+		                       24'h00FF00;
+	wire [23:0] lcd_write_diag =
+		!frame_write_debug_s2[0] ? 24'hFF0000 :	// no AW handshake
+		!frame_write_debug_s2[1] ? 24'hFF8000 :	// no W handshake
+		!frame_write_debug_s2[2] ? 24'hFFFF00 :	// no B response
+		frame_write_debug_s2[3]  ? 24'hFF00FF :	// response timeout
+		                           24'h00FF00;	// AW+W+B complete
+	wire [23:0] lcd_read_data_diag =
+		diag_seen_nonzero ? 24'h00FF00 : 24'hFF0000;
+	wire [23:0] lcd_ddr_cal_diag =
+		!ddr_cal_done_s2 ? 24'hFF0000 :
+		!ddr_cal_pass_s2 ? 24'hFFFF00 :
+		                   24'h00FF00;
+	wire [23:0] lcd_axi_read_diag =
+		frame_axi_data_seen_s2 ? 24'h00FF00 : 24'hFF0000;
+	wire [23:0] lcd_final = (LCD_STATUS_DIAG &&
+		lcd_xpos < 12'd64 && lcd_ypos < 12'd64) ? lcd_status_diag :
+		(LCD_STATUS_DIAG && lcd_xpos < 12'd64 &&
+		 lcd_ypos >= 12'd64 && lcd_ypos < 12'd128) ? lcd_write_diag :
+		(LCD_STATUS_DIAG && lcd_xpos < 12'd64 &&
+		 lcd_ypos >= 12'd128 && lcd_ypos < 12'd192) ? lcd_read_data_diag :
+		(LCD_STATUS_DIAG && lcd_xpos < 12'd64 &&
+		 lcd_ypos >= 12'd192 && lcd_ypos < 12'd256) ? lcd_ddr_cal_diag :
+		(LCD_STATUS_DIAG && lcd_xpos < 12'd64 &&
+		 lcd_ypos >= 12'd256 && lcd_ypos < 12'd320) ? lcd_axi_read_diag : lcd_ov;
+	wire 	[7:0] 	lcd_data_r = lcd_final[23:16];
+	wire 	[7:0] 	lcd_data_g = lcd_final[15:8];
+	wire 	[7:0] 	lcd_data_b = lcd_final[7:0];
 	
 	lcd_driver u_lcd_driver
 	(

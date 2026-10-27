@@ -24,7 +24,8 @@ wire        prev_frame;
 wire        next_frame;
 
 sobel_ctrl #(
-	.CLK_FREQ(CLK_FREQ)
+	.CLK_FREQ(CLK_FREQ),
+	.THR_DEFAULT(11'd64)
 ) dut (
 	.clk(clk),
 	.rst_n(rst_n),
@@ -85,8 +86,10 @@ initial begin
 	rst_n = 1'b1;
 	repeat(10) @(posedge clk);
 
-	check((threshold == 11'd256) && (mode == 2'd2) && (display_mode == 2'd0),
-		"reset: thr=256, Canny+target, live mode");
+	check((threshold == 11'd64) && (mode == 2'd2) && (display_mode == 2'd0),
+		"reset: thr=64, Canny+target, live mode");
+	check(cfg_toggle == 1'b1,
+		"reset publishes initial threshold config across clock domains");
 
 	t0 = threshold;
 	key1_press(60);

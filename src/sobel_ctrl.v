@@ -171,7 +171,9 @@ always @(posedge clk or negedge rst_n) begin
 		mode           <= 2'd2;
 		display_mode   <= 2'd0;
 		display_mode_d <= 2'd0;
-		cfg_toggle     <= 1'b0;
+		// Initial 1 is a valid toggle value: the pixel-clock synchronizer
+		// resets to 0 and therefore captures THR_DEFAULT after reset.
+		cfg_toggle     <= 1'b1;
 		prev_frame     <= 1'b0;
 		next_frame     <= 1'b0;
 	end else begin

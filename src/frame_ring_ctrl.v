@@ -29,7 +29,8 @@ module frame_ring_ctrl #(
 	parameter [31:0]  SLOT_BYTES  = 32'h0040_0000,
 	parameter [31:0]  MED_OFFSET  = 32'h0020_0000,
 	parameter integer W_BURST     = 128,
-	parameter integer R_BURST     = 8
+	parameter integer R_BURST     = 8,
+	parameter integer W_DATA_WHITE_TEST = 0
 )(
 	// AXI4 write address
 	output wire [3:0]   axi_awid,
@@ -41,13 +42,13 @@ module frame_ring_ctrl #(
 	output wire [3:0]   axi_awcache,
 	output wire [2:0]   axi_awprot,
 	output wire [3:0]   axi_awqos,
-	output reg          axi_awvalid,
+	output wire         axi_awvalid,
 	input  wire         axi_awready,
 
 	// AXI4 write data
 	output wire [127:0] axi_wdata,
 	output wire [15:0]  axi_wstrb,
-	output reg          axi_wlast,
+	output wire         axi_wlast,
 	output reg          axi_wvalid,
 	input  wire         axi_wready,
 
@@ -96,6 +97,7 @@ module frame_ring_ctrl #(
 	input  wire         rframe_vsync,
 	input  wire         rframe_data_en,
 	output wire [15:0]  rframe_data,
+	output wire         rframe_data_valid,
 
 	// UI control/status, axi_clk domain
 	input  wire [1:0]   display_mode,
@@ -107,16 +109,23 @@ module frame_ring_ctrl #(
 	output reg  [6:0]   ring_count,
 	output reg  [6:0]   write_slot,
 	output reg          write_slot_toggle,
-	output reg          frame_commit
+	output reg          frame_commit,
+	output reg          live_valid,
+	output reg  [3:0]   read_debug,
+	output reg          out_data_seen
 );
 
 localparam integer ROW_BYTES   = H_ACTIVE * 2;
 localparam integer R_BURST_BYT = R_BURST * 16;
 localparam integer ROW_BURSTS  = ROW_BYTES / R_BURST_BYT;
 localparam integer BLACK_PACKS = H_ACTIVE / 8;
+localparam integer PLANE_BYTES = H_ACTIVE * V_ACTIVE * 2;
+localparam integer W_BURST_BYT = W_BURST * 16;
+localparam integer RD_OUTSTANDING = 4;
 
 localparam [6:0] SCRATCH0 = 7'd100;
 localparam [6:0] SCRATCH1 = 7'd101;
+localparam [16:0] FLUSH_TIMEOUT = 17'h1FFFF;
 
 //----------------------------------------------------------------------
 // AXI constants and write-side FIFOs
@@ -143,14 +152,14 @@ assign axi_arqos   = 4'd0;
 
 wire [127:0] raw_fifo_rdata;
 wire         raw_fifo_empty;
-wire         raw_fifo_prog_empty;
-reg          raw_fifo_ren;
+wire         raw_fifo_ren;
+wire [9:0]   raw_fifo_count;
 
 W0_FIFO_16 u_raw_wfifo (
 	.prog_full_o  (),
 	.full_o       (),
 	.empty_o      (raw_fifo_empty),
-	.prog_empty_o (raw_fifo_prog_empty),
+	.prog_empty_o (),
 	.wr_clk_i     (wframe_clk),
 	.rd_clk_i     (axi_clk),
 	.wr_en_i      (wframe_valid),
@@ -160,21 +169,21 @@ W0_FIFO_16 u_raw_wfifo (
 	.rdata        (raw_fifo_rdata),
 	.a_rst_i      (wframe_rst || axi_reset),
 	.wr_datacount_o(),
-	.rd_datacount_o(),
+	.rd_datacount_o(raw_fifo_count),
 	.underflow_o  (),
 	.overflow_o   ()
 );
 
 wire [127:0] med_fifo_rdata;
 wire         med_fifo_empty;
-wire         med_fifo_prog_empty;
-reg          med_fifo_ren;
+wire         med_fifo_ren;
+wire [9:0]   med_fifo_count;
 
 W0_FIFO_16 u_med_wfifo (
 	.prog_full_o  (),
 	.full_o       (),
 	.empty_o      (med_fifo_empty),
-	.prog_empty_o (med_fifo_prog_empty),
+	.prog_empty_o (),
 	.wr_clk_i     (wframe_clk),
 	.rd_clk_i     (axi_clk),
 	.wr_en_i      (wframe_valid),
@@ -184,7 +193,7 @@ W0_FIFO_16 u_med_wfifo (
 	.rdata        (med_fifo_rdata),
 	.a_rst_i      (wframe_rst || axi_reset),
 	.wr_datacount_o(),
-	.rd_datacount_o(),
+	.rd_datacount_o(med_fifo_count),
 	.underflow_o  (),
 	.overflow_o   ()
 );
@@ -200,8 +209,10 @@ reg [6:0]  frame_target_slot;
 reg        frame_target_ring;
 reg        capture_active;
 reg        flush_pending;
-reg        live_valid;
+reg [16:0] flush_wait_cnt;
 reg [1:0]  display_mode_d;
+reg        dbg_aw_seen, dbg_w_seen, dbg_b_seen, dbg_commit_timeout;
+reg [3:0]  committed_write_debug;
 
 wire [7:0] oldest_full = (ring_wr_slot >= ring_count) ?
 	(ring_wr_slot - ring_count) : (ring_wr_slot + N_FRAMES - ring_count);
@@ -249,13 +260,25 @@ wire       wr_b_done = axi_bvalid && axi_bready;
 wire       wr_last_beat = (wstate == W_DATA) && axi_wvalid && axi_wready &&
 	(wr_beat == W_BURST-1);
 
-wire raw_has_burst = ~raw_fifo_prog_empty;
-wire med_has_burst = ~med_fifo_prog_empty;
+// AXI cannot pause in the middle of this fixed-length write burst. Start a
+// burst only after its complete 128-bit payload is present in the FIFO, and
+// never write past the exact raw/median plane size.
+wire raw_has_burst = (raw_fifo_count >= W_BURST) &&
+	(raw_ptr <= (PLANE_BYTES - W_BURST_BYT));
+wire med_has_burst = (med_fifo_count >= W_BURST) &&
+	(med_ptr <= (PLANE_BYTES - W_BURST_BYT));
+wire write_planes_done = (raw_ptr >= PLANE_BYTES) && (med_ptr >= PLANE_BYTES);
 wire choose_med = med_has_burst && (!raw_has_burst || last_wr_src == 1'b0);
 wire choose_raw = raw_has_burst && !choose_med;
+wire write_slot_free = (wr_outstanding == 0);
 
 assign axi_awaddr = wr_cur_addr;
-assign axi_wdata  = wr_src ? med_fifo_rdata : raw_fifo_rdata;
+assign axi_wdata  = (W_DATA_WHITE_TEST != 0) ? {128{1'b1}} :
+	(wr_src ? med_fifo_rdata : raw_fifo_rdata);
+assign axi_awvalid = (wstate == W_ADDR);
+assign axi_wlast  = (wstate == W_DATA) && (wr_beat == W_BURST-1);
+assign raw_fifo_ren = (wstate == W_DATA) && !wr_src && axi_wvalid && axi_wready;
+assign med_fifo_ren = (wstate == W_DATA) &&  wr_src && axi_wvalid && axi_wready;
 
 always @(posedge axi_clk) begin
 	if (axi_reset) begin
@@ -266,11 +289,7 @@ always @(posedge axi_clk) begin
 		raw_ptr <= 32'd0;
 		med_ptr <= 32'd0;
 		wr_beat <= 8'd0;
-		axi_awvalid <= 1'b0;
 		axi_wvalid <= 1'b0;
-		axi_wlast <= 1'b0;
-		raw_fifo_ren <= 1'b0;
-		med_fifo_ren <= 1'b0;
 		wr_outstanding <= 11'd0;
 		start_tog_s1 <= 1'b0;
 		start_tog_s2 <= 1'b0;
@@ -282,10 +301,6 @@ always @(posedge axi_clk) begin
 		replay_slot <= 7'd0;
 		display_mode_d <= 2'd0;
 		frame_commit <= 1'b0;
-		if (wr_last_beat && !wr_b_done && (wr_outstanding != 11'h7ff))
-			wr_outstanding <= wr_outstanding + 1'b1;
-		else if (wr_b_done && !wr_last_beat && (wr_outstanding != 0))
-			wr_outstanding <= wr_outstanding - 1'b1;
 		commit_count <= 15'd0;
 		ring_wr_slot <= 7'd0;
 		scratch_wr_slot <= SCRATCH0;
@@ -299,9 +314,14 @@ always @(posedge axi_clk) begin
 		frame_target_ring <= 1'b1;
 		frame_target_slot <= 7'd0;
 		live_valid <= 1'b0;
+		flush_wait_cnt <= 17'd0;
+		dbg_aw_seen <= 1'b0;
+		dbg_w_seen <= 1'b0;
+		dbg_b_seen <= 1'b0;
+		dbg_commit_timeout <= 1'b0;
+		read_debug <= 4'd0;
+		committed_write_debug <= 4'd0;
 	end else begin
-		raw_fifo_ren <= 1'b0;
-		med_fifo_ren <= 1'b0;
 		frame_commit <= 1'b0;
 		start_tog_s1 <= wframe_start_toggle;
 		start_tog_s2 <= start_tog_s1;
@@ -309,6 +329,21 @@ always @(posedge axi_clk) begin
 		end_tog_s1 <= wframe_end_toggle;
 		end_tog_s2 <= end_tog_s1;
 		end_tog_s3 <= end_tog_s2;
+		if (flush_pending && raw_fifo_empty && med_fifo_empty &&
+			(flush_wait_cnt != FLUSH_TIMEOUT))
+			flush_wait_cnt <= flush_wait_cnt + 1'b1;
+		else if (!flush_pending)
+			flush_wait_cnt <= 17'd0;
+		if (wr_last_beat && !wr_b_done && (wr_outstanding != 11'h7ff))
+			wr_outstanding <= wr_outstanding + 1'b1;
+		else if (wr_b_done && !wr_last_beat && (wr_outstanding != 0))
+			wr_outstanding <= wr_outstanding - 1'b1;
+		if (axi_awvalid && axi_awready)
+			dbg_aw_seen <= 1'b1;
+		if (axi_wvalid && axi_wready)
+			dbg_w_seen <= 1'b1;
+		if (wr_b_done)
+			dbg_b_seen <= 1'b1;
 
 		// New frame. The frame-slot choice is frozen for the whole frame.
 		if (frame_start_edge) begin
@@ -320,6 +355,10 @@ always @(posedge axi_clk) begin
 			frame_target_slot <= (display_mode == 2'd0) ? ring_wr_slot : scratch_wr_slot;
 			write_slot <= (display_mode == 2'd0) ? ring_wr_slot : scratch_wr_slot;
 			write_slot_toggle <= ~write_slot_toggle;
+			dbg_aw_seen <= 1'b0;
+			dbg_w_seen <= 1'b0;
+			dbg_b_seen <= 1'b0;
+			dbg_commit_timeout <= 1'b0;
 		end
 		if (frame_end_edge && capture_active)
 			flush_pending <= 1'b1;
@@ -339,25 +378,30 @@ always @(posedge axi_clk) begin
 
 		case (wstate)
 			W_IDLE: begin
-				axi_awvalid <= 1'b0;
 				axi_wvalid <= 1'b0;
-				axi_wlast <= 1'b0;
 				wr_beat <= 8'd0;
 
-				if (capture_active && (raw_has_burst || med_has_burst)) begin
+				if (capture_active && write_slot_free &&
+					(raw_has_burst || med_has_burst)) begin
 					wr_cur_addr <= frame_target_slot * SLOT_BYTES +
 						((choose_med) ? (MED_OFFSET + med_ptr) : raw_ptr);
 					wr_src <= choose_med;
 					last_wr_src <= choose_med;
 					wstate <= W_ADDR;
 				end else if (flush_pending && capture_active &&
-					raw_fifo_empty && med_fifo_empty && (wr_outstanding == 0)) begin
+					raw_fifo_empty && med_fifo_empty &&
+					write_planes_done &&
+					((wr_outstanding == 0) || (flush_wait_cnt == FLUSH_TIMEOUT))) begin
 					capture_active <= 1'b0;
 					flush_pending <= 1'b0;
 					frame_commit <= 1'b1;
 					live_slot <= frame_target_slot;
 					live_valid <= 1'b1;
 					commit_count <= commit_count + 1'b1;
+					if (wr_outstanding != 0)
+						dbg_commit_timeout <= 1'b1;
+					committed_write_debug <= {
+						(wr_outstanding != 0), dbg_b_seen, dbg_w_seen, dbg_aw_seen};
 
 					if (frame_target_ring) begin
 						ring_wr_slot <= (ring_wr_slot == N_FRAMES-1) ? 7'd0 : ring_wr_slot + 1'b1;
@@ -371,9 +415,7 @@ always @(posedge axi_clk) begin
 			end
 
 			W_ADDR: begin
-				axi_awvalid <= 1'b1;
 				if (axi_awready) begin
-					axi_awvalid <= 1'b0;
 					axi_wvalid <= 1'b1;
 					wstate <= W_DATA;
 				end
@@ -381,16 +423,9 @@ always @(posedge axi_clk) begin
 
 			W_DATA: begin
 				axi_wvalid <= 1'b1;
-				axi_wlast <= (wr_beat == W_BURST-1);
 				if (axi_wready) begin
-					if (wr_src)
-						med_fifo_ren <= 1'b1;
-					else
-						raw_fifo_ren <= 1'b1;
-
 					if (wr_beat == W_BURST-1) begin
 						axi_wvalid <= 1'b0;
-						axi_wlast <= 1'b0;
 						wr_beat <= 8'd0;
 						if (wr_src)
 							med_ptr <= med_ptr + W_BURST*16;
@@ -407,6 +442,7 @@ always @(posedge axi_clk) begin
 				wstate <= W_IDLE;
 			end
 		endcase
+		read_debug <= committed_write_debug;
 	end
 end
 
@@ -440,7 +476,7 @@ wire [127:0] rfifo_wdata;
 wire         rfifo_we;
 reg  [127:0] rfifo_wdata_r;
 reg          rfifo_we_r;
-wire         rfifo_wfull;
+wire         rfifo_full;
 wire         rfifo_empty;
 
 assign rfifo_wdata = rfifo_wdata_r;
@@ -448,8 +484,8 @@ assign rfifo_we    = rfifo_we_r;
 
 R0_FIFO_16 u_R0_FIFO_16 (
 	.almost_full_o  (),
-	.prog_full_o    (rfifo_wfull),
-	.full_o         (),
+	.prog_full_o    (),
+	.full_o         (rfifo_full),
 	.wr_ack_o       (),
 	.empty_o        (rfifo_empty),
 	.almost_empty_o (),
@@ -467,6 +503,8 @@ R0_FIFO_16 u_R0_FIFO_16 (
 	.underflow_o    (),
 	.overflow_o     ()
 );
+
+assign rframe_data_valid = !rfifo_empty;
 
 //----------------------------------------------------------------------
 // DDR display reader / scan-order builder
@@ -496,8 +534,11 @@ reg [6:0]  rd_live_slot;
 reg [6:0]  rd_freeze_slot;
 reg [6:0]  rd_replay_slot;
 reg [9:0]  rd_src_y;
-reg [4:0]  rd_burst_idx;
-reg [2:0]  rd_beat_idx;
+reg [2:0]  rd_cmd_idx;
+reg [2:0]  rd_out_idx;
+reg [2:0]  rd_ar_outstanding;
+reg        rd_ar_busy;
+reg [5:0]  rd_beat_idx;
 reg [7:0]  rd_black_cnt;
 reg [63:0] even_half;
 
@@ -509,11 +550,15 @@ wire [63:0] raw_even4 = {
 wire [31:0] rd_row_offset = rd_src_y * ROW_BYTES;
 wire [31:0] rd_slot_base  = rd_slot * SLOT_BYTES;
 wire [31:0] rd_plane_base = rd_slot_base + (rd_planar ? MED_OFFSET : 32'd0);
-wire [31:0] rd_burst_addr = rd_plane_base + rd_row_offset + rd_burst_idx*R_BURST_BYT;
+wire [31:0] rd_burst_addr = rd_plane_base + rd_row_offset + rd_cmd_idx*R_BURST_BYT;
 wire [6:0]  rd_right_slot = (rd_mode_latched == 2'd2) ? rd_replay_slot : rd_freeze_slot;
+wire        rd_ar_accept = (rd_state == RD_AR) && rd_ar_busy && axi_arready;
+wire        rd_rburst_done = (rd_state == RD_AR) && axi_rvalid && axi_rready &&
+	(rd_beat_idx == R_BURST-1);
 
-// Keep FIFO input safely behind the programmable-full mark.
-wire fifo_has_room = !rfifo_wfull;
+// Fill the complete display FIFO before back-pressuring DDR reads. This gives
+// the scan engine close to three LCD lines of prefetch against DDR latency.
+wire fifo_has_room = !rfifo_full;
 
 always @(posedge axi_clk) begin
 	if (axi_reset) begin
@@ -534,8 +579,11 @@ always @(posedge axi_clk) begin
 		rd_freeze_slot <= 7'd0;
 		rd_replay_slot <= 7'd0;
 		rd_src_y <= 10'd0;
-		rd_burst_idx <= 5'd0;
-		rd_beat_idx <= 3'd0;
+		rd_cmd_idx <= 3'd0;
+		rd_out_idx <= 3'd0;
+		rd_ar_outstanding <= 3'd0;
+		rd_ar_busy <= 1'b0;
+		rd_beat_idx <= 6'd0;
 		rd_black_cnt <= 8'd0;
 		even_half <= 64'd0;
 		axi_arvalid <= 1'b0;
@@ -543,6 +591,7 @@ always @(posedge axi_clk) begin
 		axi_rready <= 1'b0;
 		rfifo_we_r <= 1'b0;
 		rfifo_wdata_r <= 128'd0;
+		out_data_seen <= 1'b0;
 	end else begin
 		rfifo_we_r <= 1'b0;
 		axi_arvalid <= 1'b0;
@@ -550,6 +599,12 @@ always @(posedge axi_clk) begin
 		rframe_toggle_s1 <= rframe_frame_toggle;
 		rframe_toggle_s2 <= rframe_toggle_s1;
 		rframe_toggle_s3 <= rframe_toggle_s2;
+		if (rd_ar_accept && !rd_rburst_done &&
+			(rd_ar_outstanding != RD_OUTSTANDING))
+			rd_ar_outstanding <= rd_ar_outstanding + 1'b1;
+		else if (!rd_ar_accept && rd_rburst_done &&
+			(rd_ar_outstanding != 0))
+			rd_ar_outstanding <= rd_ar_outstanding - 1'b1;
 
 		if (rframe_toggle_s2 ^ rframe_toggle_s3) begin
 			start_wait <= 8'd128;
@@ -569,8 +624,11 @@ always @(posedge axi_clk) begin
 		case (rd_state)
 			RD_SETUP: begin
 				axi_arvalid <= 1'b0;
-				rd_burst_idx <= 5'd0;
-				rd_beat_idx <= 3'd0;
+				rd_cmd_idx <= 3'd0;
+				rd_out_idx <= 3'd0;
+				rd_ar_outstanding <= 3'd0;
+				rd_ar_busy <= 1'b0;
+				rd_beat_idx <= 6'd0;
 				rd_seg_right <= 1'b0;
 
 				if (out_y >= V_ACTIVE) begin
@@ -614,26 +672,30 @@ always @(posedge axi_clk) begin
 			end
 
 			RD_AR: begin
-				if (start_wait == 0 && fifo_has_room) begin
-					axi_araddr <= rd_burst_addr;
-					axi_arvalid <= 1'b1;
-					rd_state <= RD_AR_WAIT;
-				end
-			end
+				if (start_wait == 0) begin
+					// Keep up to four read bursts in flight. Because all
+					// requests use the same AXI ID, R beats return in order.
+					if (rd_ar_busy) begin
+						axi_arvalid <= 1'b1;
+						if (axi_arready) begin
+							axi_arvalid <= 1'b0;
+							rd_ar_busy <= 1'b0;
+							rd_cmd_idx <= rd_cmd_idx + 1'b1;
+						end
+					end else if (fifo_has_room &&
+						(rd_ar_outstanding < RD_OUTSTANDING) &&
+						(rd_cmd_idx < ROW_BURSTS)) begin
+						axi_araddr <= rd_burst_addr;
+						axi_arvalid <= 1'b1;
+						rd_ar_busy <= 1'b1;
+					end
 
-			RD_AR_WAIT: begin
-				axi_arvalid <= 1'b1;
-				if (axi_arready) begin
-					axi_arvalid <= 1'b0;
-					rd_state <= RD_DATA;
-				end
-			end
+					if ((rd_ar_outstanding != 0) && fifo_has_room)
+						axi_rready <= 1'b1;
 
-			RD_DATA: begin
-				if (fifo_has_room)
-					axi_rready <= 1'b1;
-
-				if (axi_rvalid && axi_rready) begin
+					if (axi_rvalid && axi_rready) begin
+					if (axi_rdata[15:1] != 15'd0)
+						out_data_seen <= 1'b1;
 					if (!rd_even) begin
 						rfifo_we_r <= 1'b1;
 						rfifo_wdata_r <= axi_rdata;
@@ -645,22 +707,14 @@ always @(posedge axi_clk) begin
 					end
 
 					if (rd_beat_idx == R_BURST-1) begin
-						rd_beat_idx <= 3'd0;
-						rd_state <= RD_NEXT_BST;
+						rd_beat_idx <= 6'd0;
+						rd_out_idx <= rd_out_idx + 1'b1;
+						if (rd_out_idx == ROW_BURSTS-1)
+							rd_state <= RD_NEXT_SEG;
 					end else begin
 						rd_beat_idx <= rd_beat_idx + 1'b1;
 					end
 				end
-			end
-
-			RD_NEXT_BST: begin
-				if (rd_burst_idx == ROW_BURSTS-1) begin
-					rd_burst_idx <= 5'd0;
-					rd_state <= RD_NEXT_SEG;
-				end else begin
-					rd_burst_idx <= rd_burst_idx + 1'b1;
-					rd_beat_idx <= 3'd0;
-					rd_state <= RD_AR;
 				end
 			end
 
@@ -671,8 +725,11 @@ always @(posedge axi_clk) begin
 					rd_planar <= 1'b1;	// right half: frozen median-gray
 					rd_src_y <= (out_y - 10'd180) << 1;
 					rd_even <= 1'b1;
-					rd_burst_idx <= 5'd0;
-					rd_beat_idx <= 3'd0;
+					rd_cmd_idx <= 3'd0;
+					rd_out_idx <= 3'd0;
+					rd_ar_outstanding <= 3'd0;
+					rd_ar_busy <= 1'b0;
+					rd_beat_idx <= 6'd0;
 					rd_state <= RD_AR;
 				end else begin
 					rd_state <= RD_ROW_END;
