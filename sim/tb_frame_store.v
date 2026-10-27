@@ -11,23 +11,23 @@
 //======================================================================
 module tb_frame_store;
 
-//---- DUT 参数 (小尺寸) ----
-localparam integer H        = 64;
-localparam integer V        = 32;
+//---- DUT 参数 (默认小尺寸; 可用 vsim -G 覆盖成多突发/行的尺寸) ----
+parameter  integer H        = 64;
+parameter  integer V        = 32;
+parameter  integer LINE_CYC = 200;
+parameter  integer SLOT_AW  = 13;			// 8KB / slot
 localparam integer N_RING   = 4;
 localparam integer N_SCR    = 2;
-localparam integer SLOT_AW  = 13;			// 8KB / slot
 localparam integer W_BURST  = 128;
-localparam integer R_BURST  = 16;
+localparam integer R_BURST  = 64;		// DUT 最大突发, 从机按 ARLEN 返回
 localparam integer VSTART   = 5;
 
-localparam integer FRAME_PIX   = H * V;					// 2048
-localparam integer TILE_W      = H / 2;					// 32
-localparam integer SPLIT_H     = V / 2;					// 16
-localparam integer SPLIT_Y0    = (V - SPLIT_H) / 2;	// 8
-localparam integer LINE_CYC    = 200;
+localparam integer FRAME_PIX   = H * V;
+localparam integer TILE_W      = H / 2;
+localparam integer SPLIT_H     = V / 2;
+localparam integer SPLIT_Y0    = (V - SPLIT_H) / 2;
 localparam integer H_BACK      = 50;
-localparam integer V_TOTAL     = VSTART + V + 5;		// 42
+localparam integer V_TOTAL     = VSTART + V + 5;
 
 integer errors = 0;
 
@@ -196,7 +196,6 @@ frame_store #(
 	.N_RING(N_RING), .N_SCRATCH(N_SCR),
 	.SLOT_AW(SLOT_AW),
 	.W_BURST(W_BURST), .R_BURST(R_BURST),
-	.RD_OUTSTANDING(4),
 	.V_ACTIVE_START(VSTART)
 ) dut (
 	.axi_awid(awid), .axi_awaddr(awaddr), .axi_awlen(awlen),
@@ -230,7 +229,7 @@ frame_store #(
 //----------------------------------------------------------------------
 // AXI 从机模型: 写突发进 ddr[], 读突发按 16 拍返回
 //----------------------------------------------------------------------
-reg [127:0] ddr [0:8191];
+reg [127:0] ddr [0:262143];
 
 // --- 写通道 ---
 reg [31:0] wr_addr;
@@ -265,24 +264,27 @@ always @(posedge clk) begin
 end
 
 // --- 读通道: 4 个 AR 队列, 每次返回 16 拍 ---
-reg [31:0] arq [0:7];
+reg [31:0] arq     [0:7];
+reg [7:0]  arq_len [0:7];
 reg [2:0]  arq_wr = 0, arq_rd = 0;
 reg [4:0]  arq_cnt = 0;
 assign arready = (arq_cnt < 5'd4);
 
 reg  [31:0]  rd_addr;
-reg  [4:0]   rd_beat = 0;
+reg  [7:0]   rd_len  = 0;
+reg  [7:0]   rd_beat = 0;
 reg  [5:0]   rd_lat  = 0;
 reg          rd_act  = 0;
 reg  [127:0] rdata_r = 0;
 
 assign rvalid = rd_act && (rd_lat == 0);
-assign rlast  = rvalid && (rd_beat == R_BURST-1);
+assign rlast  = rvalid && (rd_beat == rd_len);
 assign rdata  = rdata_r;
 
 always @(posedge clk) begin
 	if (arvalid && arready) begin
-		arq[arq_wr] <= araddr;
+		arq[arq_wr]     <= araddr;
+		arq_len[arq_wr] <= arlen;
 		arq_wr <= arq_wr + 3'd1;
 		arq_cnt <= arq_cnt + 5'd1;
 	end
@@ -290,20 +292,21 @@ always @(posedge clk) begin
 	if (!rd_act && (arq_cnt != 0)) begin
 		rd_act  <= 1'b1;
 		rd_addr <= arq[arq_rd];
+		rd_len  <= arq_len[arq_rd];
 		arq_rd  <= arq_rd + 3'd1;
 		arq_cnt <= arq_cnt - 5'd1;
-		rd_beat <= 5'd0;
+		rd_beat <= 8'd0;
 		rd_lat  <= 6'd12;
 		rdata_r <= ddr[arq[arq_rd] >> 4];
 	end else if (rd_act) begin
 		if (rd_lat != 0) begin
 			rd_lat <= rd_lat - 6'd1;
 		end else if (rvalid && rready) begin
-			if (rd_beat == R_BURST-1)
+			if (rd_beat == rd_len)
 				rd_act <= 1'b0;
 			else begin
-				rd_beat <= rd_beat + 5'd1;
-				rdata_r <= ddr[(rd_addr >> 4) + rd_beat + 5'd1];
+				rd_beat <= rd_beat + 8'd1;
+				rdata_r <= ddr[(rd_addr >> 4) + rd_beat + 8'd1];
 			end
 		end
 	end

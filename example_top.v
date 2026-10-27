@@ -1203,7 +1203,7 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 		.H_ACTIVE(1280), .V_ACTIVE(720),
 		.N_RING(100), .N_SCRATCH(3),
 		.SLOT_AW(22),			// 4MiB / slot
-		.W_BURST(128), .R_BURST(16), .RD_OUTSTANDING(4),
+		.W_BURST(128), .R_BURST(64),
 		.V_ACTIVE_START(25)	// 720p: V_SYNC=5 + V_BACK=20
 	) u_frame_store (
 		.axi_awid       (w_ddr3_awid        ),
