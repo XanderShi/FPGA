@@ -1295,19 +1295,22 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 	//	【高阶挑战3】显示合成:
 	//	  实时模式 : 左 640 列 = 彩色原图+红色 Canny 边缘 + 目标框/标签,
 	//	             右 640 列 = Canny 二值边缘 (与旧版默认一致)
-	//	  冻结/回放: 左 640 列 = 实时彩色+红边, 右 640 列 = 冻结/历史中值灰度,
+	//	  冻结/回放: 左 640 列 = 实时原始彩色, 右 640 列 = 冻结/历史原始彩色,
 	//	             两个源都按 2x2 抽样成 640x360, 上下留黑边
 	//	  帧存储 pix_l = {RGB555,edge}, pix_r = {8'h0,median_gray}
 	wire 	[11:0] 	lcd_xpos, lcd_ypos;
 	localparam LIVE_SPLIT = 1'b1;		//1=实时左右分屏(左彩色+红边/右二值)  0=整屏二值
-	wire 	[23:0] 	lcd_rgb888 = {pix_l[15:11], pix_l[13:11],	// R5 -> R8
-	                              pix_l[10:6],  pix_l[8:6],	// G5 -> G8
-	                              pix_l[5:1],   pix_l[3:1]};	// B5 -> B8
-	wire 	[23:0] 	lcd_live_col = pix_l[0] ? 24'hFF0000 : lcd_rgb888;
+	wire 	[23:0] 	lcd_col_l = {pix_l[15:11], pix_l[13:11],	// R5 -> R8
+	                             pix_l[10:6],  pix_l[8:6],	// G5 -> G8
+	                             pix_l[5:1],   pix_l[3:1]};	// B5 -> B8
+	wire 	[23:0] 	lcd_col_r = {pix_r[15:11], pix_r[13:11],
+	                             pix_r[10:6],  pix_r[8:6],
+	                             pix_r[5:1],   pix_r[3:1]};
+	wire 	[23:0] 	lcd_live_col = pix_l[0] ? 24'hFF0000 : lcd_col_l;
 	wire 	[23:0] 	lcd_live_bin = pix_l[0] ? 24'hFFFFFF : 24'h000000;
-	wire 	[23:0] 	lcd_split_r  = {pix_r[7:0], pix_r[7:0], pix_r[7:0]};
+	//	实时: 左彩色+红边 / 右二值;  冻结/回放: 左右都是原始彩色
 	wire 	[23:0] 	lcd_pixel = !pix_valid ? 24'h000000 :
-	                           (pix_split ? ((lcd_xpos < 12'd640) ? lcd_live_col : lcd_split_r)
+	                           (pix_split ? ((lcd_xpos < 12'd640) ? lcd_col_l : lcd_col_r)
 	                                      : ((LIVE_SPLIT && (lcd_xpos < 12'd640)) ? lcd_live_col
 	                                                                              : lcd_live_bin));
 

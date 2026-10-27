@@ -121,7 +121,7 @@ module frame_store #(
 	input  wire         lcd_request,
 	input  wire [11:0]  lcd_xpos,
 	output wire [15:0]  pix_l,			// 左/实时: RGB555+edge
-	output wire [15:0]  pix_r,			// 右: {8'h0, median_gray}
+	output wire [15:0]  pix_r,			// 右: 原始 RGB555+edge (冻结/回放彩色对比)
 	output wire         pix_valid,		// 本行数据有效
 	output wire         pix_split		// 1=左右对比
 );
@@ -601,15 +601,15 @@ wire [127:0] cur_r = grp_first_r ? lbq_r : wc_r;
 wire [1:0] sub = (act_mode == 2'd0) ? lcd_xpos[1:0] : {lcd_xpos[0], 1'b0};
 
 // Efinity FIFO ENDIANESS=0(大端): 32->128 时第一个像素在 [127:96]
-wire [15:0] raw16 = (sub == 2'd0) ? cur_l[111:96] :
-                    (sub == 2'd1) ? cur_l[79:64]  :
-                    (sub == 2'd2) ? cur_l[47:32]  : cur_l[15:0];
-wire [7:0]  gray8 = (sub == 2'd0) ? cur_r[119:112] :
-                    (sub == 2'd1) ? cur_r[87:80]   :
-                    (sub == 2'd2) ? cur_r[55:48]   : cur_r[23:16];
+wire [15:0] raw16_l = (sub == 2'd0) ? cur_l[111:96] :
+                      (sub == 2'd1) ? cur_l[79:64]  :
+                      (sub == 2'd2) ? cur_l[47:32]  : cur_l[15:0];
+wire [15:0] raw16_r = (sub == 2'd0) ? cur_r[111:96] :
+                      (sub == 2'd1) ? cur_r[79:64]  :
+                      (sub == 2'd2) ? cur_r[47:32]  : cur_r[15:0];
 
-assign pix_l     = raw16;
-assign pix_r     = {8'h00, gray8};
+assign pix_l     = raw16_l;
+assign pix_r     = raw16_r;
 assign pix_valid = live_valid_p[1] && line_ok && line_ready;
 assign pix_split = (act_mode != 2'd0);
 

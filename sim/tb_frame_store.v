@@ -352,9 +352,9 @@ begin
 					bad = bad + 1;
 				end
 			end else begin
-				exp_r = fram_gray[right_s][(ey-SPLIT_Y0)*2*H + 2*(ex-TILE_W)];
+				exp_r = fram_raw[right_s][(ey-SPLIT_Y0)*2*H + 2*(ex-TILE_W)];
 				if (!dv[ey][ex]) bad = bad + 1;
-				else if (dr[ey][ex][7:0] !== exp_r[7:0]) begin
+				else if (dr[ey][ex] !== exp_r[15:0]) begin
 					if (bad < 3)
 						$display("   [FAIL] split R y=%0d x=%0d got=%h exp=%h",
 							ey, ex, dr[ey][ex], exp_r);
