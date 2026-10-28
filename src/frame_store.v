@@ -31,7 +31,7 @@ module frame_store #(
 	parameter integer N_SCRATCH  = 3,
 	parameter integer SLOT_AW    = 22,			// 4MiB / slot
 	parameter integer W_BURST    = 128,			// AXI 写突发拍数(128bit/拍)
-	parameter integer R_BURST    = 64,			// AXI 读突发拍数(1024B, 4KB 内安全)
+	parameter integer R_BURST    = 128,			// AXI 读最大突发(2048B, 由 4KB 对齐逻辑切分)
 	parameter integer V_ACTIVE_START = 25		// lcd vcnt 中第一个有效行的位置(V_SYNC+V_BACK)
 )(
 	////////////////////////////////////////////////////////////////
@@ -610,29 +610,22 @@ wire [15:0] raw16_r = (sub == 2'd0) ? cur_r[111:96] :
 
 assign pix_l     = raw16_l;
 assign pix_r     = raw16_r;
-assign pix_valid = live_valid_p[1] && line_ok && line_ready;
+assign pix_valid = live_valid_p[1] && line_ok && bank_ready[rd_bank_p];
 assign pix_split = (act_mode != 2'd0);
 
 //======================================================================
 //  AXI 读: 按行取数
-//  单 outstanding + 每行按 64 拍(1024B)突发读取。
-//  行起始地址按 1024B 对齐, 1024B 突发不会跨 4KB 边界; 128 拍(2048B)
-//  突发在奇数行会跨 4KB, 属于 AXI4 违例, 不能用。
-//  不依赖"同 ID 多 outstanding 按序返回", 与旧版上板验证过的读法一致。
+//  单 outstanding; 每行按 4KB 边界切成不超过 128 拍(2048B)的突发,
+//  1280 宽一行 5120B 通常 3 个突发(128/128/64 或 128/64/128),
+//  比 5x64 拍少 2 次 AR/读延迟, 给行缓存留更大余量。
 //======================================================================
-localparam integer R_BYTES_MAX = R_BURST * 16;					// 2048
-localparam integer ROW_FULL    = ROW_BYTES / R_BYTES_MAX;		// 2 (1280 宽)
-localparam integer ROW_REM     = ROW_BYTES % R_BYTES_MAX;		// 1024
-localparam integer ROW_BURSTS  = ROW_FULL + ((ROW_REM != 0) ? 1 : 0);	// 3
-localparam integer ROW_REM_BEAT= ROW_REM / 16;					// 64
-
 localparam [1:0] R_IDLE = 2'd0;
 localparam [1:0] R_ACT  = 2'd1;
 
 reg  [1:0]  rstate;
 reg  [1:0]  cur_tile;			// 0=左/实时  1=右(对比)
-reg  [3:0]  cur_burst;			// 0..ROW_BURSTS-1
-reg  [9:0]  wr_beat;			// 行内 128bit 字数 0..LB_WORDS-1
+reg  [12:0] rd_off;				// 行内字节偏移
+reg  [9:0]  wr_beat;			// 行内 128bit 字数
 reg         ar_need;
 reg  [11:0] rd_src_y;
 reg  [6:0]  rd_slot_l, rd_slot_r;
@@ -644,10 +637,15 @@ wire [31:0] rd_row_base_l = ({25'd0, rd_slot_l} << SLOT_AW) +
                             ({20'd0, rd_src_y} * ROW_BYTES[15:0]);
 wire [31:0] rd_row_base_r = ({25'd0, rd_slot_r} << SLOT_AW) +
                             ({20'd0, rd_src_y} * ROW_BYTES[15:0]);
-wire [31:0] rd_ar_addr = cur_tile ? rd_row_base_r : rd_row_base_l;
-wire [31:0] rd_ar_addr_b = rd_ar_addr + {21'd0, cur_burst} * R_BYTES_MAX[10:0];
-wire [7:0]  rd_ar_len = (cur_burst < ROW_FULL[3:0]) ? (R_BURST[7:0] - 8'd1)
-                                                     : (ROW_REM_BEAT[7:0] - 8'd1);
+wire [31:0] rd_cur_base = cur_tile ? rd_row_base_r : rd_row_base_l;
+wire [31:0] rd_cur_addr = rd_cur_base + {19'd0, rd_off};
+wire [31:0] rd_rem      = ROW_BYTES[31:0] - {19'd0, rd_off};
+wire [31:0] rd_to4k     = 32'd4096 - (rd_cur_addr & 32'h0000_0FFF);
+wire [31:0] rd_len_b    = (rd_rem < rd_to4k)
+                        ? ((rd_rem < 32'd2048) ? rd_rem : 32'd2048)
+                        : ((rd_to4k < 32'd2048) ? rd_to4k : 32'd2048);
+wire [7:0]  rd_len_beats= rd_len_b[11:4];		// 字节/16, 1..128
+wire [7:0]  rd_ar_len   = rd_len_beats - 8'd1;
 
 wire        r_hs   = axi_rvalid & axi_rready;
 wire        lb_we0 = r_hs & (cur_tile == 2'd0);
@@ -665,7 +663,7 @@ always @(posedge axi_clk or posedge axi_reset) begin
 	if (axi_reset) begin
 		rstate      <= R_IDLE;
 		cur_tile    <= 2'd0;
-		cur_burst   <= 4'd0;
+		rd_off      <= 13'd0;
 		wr_beat     <= 10'd0;
 		ar_need     <= 1'b0;
 		rd_src_y    <= 12'd0;
@@ -691,7 +689,7 @@ always @(posedge axi_clk or posedge axi_reset) begin
 			wr_bank    <= desc_bank;
 			rd_split   <= desc_split;
 			cur_tile   <= 2'd0;
-			cur_burst  <= 4'd0;
+			rd_off     <= 13'd0;
 			wr_beat    <= 10'd0;
 			ar_need    <= 1'b1;
 			rstate     <= R_ACT;
@@ -701,7 +699,7 @@ always @(posedge axi_clk or posedge axi_reset) begin
 		if (rstate == R_ACT) begin
 			// 单 outstanding: 上一突发 RLAST 回来后才发下一个 AR
 			if (ar_need && !axi_arvalid) begin
-				axi_araddr  <= rd_ar_addr_b;
+				axi_araddr  <= rd_cur_addr;
 				axi_arlen   <= rd_ar_len;
 				axi_arvalid <= 1'b1;
 				ar_need     <= 1'b0;
@@ -712,10 +710,10 @@ always @(posedge axi_clk or posedge axi_reset) begin
 			if (r_hs) begin
 				wr_beat <= wr_beat + 10'd1;
 				if (axi_rlast) begin
-					if (cur_burst == (ROW_BURSTS[3:0] - 4'd1)) begin
+					if (({19'd0, rd_off} + rd_len_b) >= ROW_BYTES[31:0]) begin
 						if (rd_split && (cur_tile == 2'd0)) begin
 							cur_tile  <= 2'd1;
-							cur_burst <= 4'd0;
+							rd_off    <= 13'd0;
 							wr_beat   <= 10'd0;
 							ar_need   <= 1'b1;
 						end else begin
@@ -725,8 +723,8 @@ always @(posedge axi_clk or posedge axi_reset) begin
 							ack_tog_a  <= ~ack_tog_a;
 						end
 					end else begin
-						cur_burst <= cur_burst + 4'd1;
-						ar_need   <= 1'b1;
+						rd_off  <= rd_off + rd_len_b[12:0];
+						ar_need <= 1'b1;
 					end
 				end
 			end
