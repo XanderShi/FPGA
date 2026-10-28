@@ -19,7 +19,7 @@ parameter  integer SLOT_AW  = 13;			// 8KB / slot
 localparam integer N_RING   = 4;
 localparam integer N_SCR    = 2;
 localparam integer W_BURST  = 128;
-localparam integer R_BURST  = 64;		// DUT 最大突发, 从机按 ARLEN 返回
+localparam integer R_BURST  = 128;		// DUT 最大突发, 从机按 ARLEN 返回
 localparam integer VSTART   = 5;
 
 localparam integer FRAME_PIX   = H * V;
