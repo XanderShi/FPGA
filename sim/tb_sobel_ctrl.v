@@ -13,8 +13,9 @@
 //   T6 K2 长按 -> 回放
 //   T7 回放中 K1/K2 短按翻帧, 阈值不变
 //   T8 K2 长按 -> 退出回放
-//   T9 K1+K2 -> 算法模式循环, 不触发冻结
-//   T10 cfg_toggle 上电推送
+//   T9 K1+K2 -> 显示画面 0->1->2->0, 算法模式保持 2, 不触发冻结
+//   T9b K1+K2 按住 3s 只切换一次
+//   T10 cfg_toggle 上电/切模式推送
 //======================================================================
 module tb_sobel_ctrl;
 
@@ -34,6 +35,7 @@ reg frames_ready = 1'b1;
 
 wire [10:0] threshold;
 wire [1:0]  mode;
+wire [1:0]  view_mode;
 wire        cfg_toggle;
 wire [1:0]  disp_mode;
 wire        freeze_enter;
@@ -58,7 +60,7 @@ sobel_ctrl #(.CLK_FREQ(CLK_FREQ)) dut (
 	.clk(clk), .rst_n(rst_n),
 	.key1_n(key1_n), .key2_n(key2_n),
 	.live_slot(live_slot), .live_valid(live_valid), .frames_ready(frames_ready),
-	.threshold(threshold), .mode(mode), .cfg_toggle(cfg_toggle),
+	.threshold(threshold), .mode(mode), .view_mode(view_mode), .cfg_toggle(cfg_toggle),
 	.disp_mode(disp_mode),
 	.freeze_enter(freeze_enter), .freeze_slot_in(freeze_slot_in),
 	.replay_enter(replay_enter), .step_prev(step_prev), .step_next(step_next)
@@ -96,8 +98,8 @@ task chk(input cond, input [8*72:1] name);
 begin
 	if (cond) $display("   [PASS] %0s", name);
 	else begin
-		$display("   [FAIL] %0s  (thr=%0d mode=%0d disp=%0d freeze=%0d rep=%0d fz_slot=%0d)",
-			name, threshold, mode, disp_mode, freeze_cnt, replay_cnt, freeze_slot_in);
+		$display("   [FAIL] %0s  (thr=%0d mode=%0d view=%0d disp=%0d freeze=%0d rep=%0d fz_slot=%0d)",
+			name, threshold, mode, view_mode, disp_mode, freeze_cnt, replay_cnt, freeze_slot_in);
 		errors = errors + 1;
 	end
 end
@@ -115,6 +117,7 @@ initial begin
 	$display("-- T1 defaults --");
 	chk(threshold == 11'd64, "default threshold = 64");
 	chk(mode == 2'd2, "default algo mode = 2");
+	chk(view_mode == 2'd0, "default view = split color/binary");
 	chk(disp_mode == 2'd0, "default display = live");
 
 	// T2 短按
@@ -167,16 +170,27 @@ initial begin
 	k2_press(900);
 	chk(disp_mode == 2'd0, "K2 long: back to live");
 
-	// T9 组合键
-	$display("-- T9 combo algo mode --");
+	// T9 组合键: 显示画面循环, 算法模式保持
+	$display("-- T9 combo view mode --");
 	combo_press(100);
-	chk(mode == 2'd0, "combo: algo 2 -> 0");
+	chk(view_mode == 2'd1, "combo: view 0 -> 1 (full binary)");
+	chk(mode == 2'd2, "combo: algo mode stays 2");
 	combo_press(100);
-	chk(mode == 2'd1, "combo: algo 0 -> 1");
+	chk(view_mode == 2'd2, "combo: view 1 -> 2 (full color)");
+	chk(mode == 2'd2, "combo: algo mode stays 2");
 	combo_press(100);
-	chk(mode == 2'd2, "combo: algo 1 -> 2");
+	chk(view_mode == 2'd0, "combo: view 2 -> 0 (split)");
+	chk(mode == 2'd2, "combo: algo mode stays 2");
 	chk(freeze_cnt == 1, "combo: no freeze");
 	chk(disp_mode == 2'd0, "combo: still live");
+	chk(threshold == 11'd64, "combo: threshold unchanged");
+
+	// T9b 按住组合键 3s: 只切换一次
+	$display("-- T9b combo hold --");
+	combo_press(3000);
+	chk(view_mode == 2'd1, "combo hold: only one step");
+	chk(freeze_cnt == 1, "combo hold: no freeze");
+	chk(disp_mode == 2'd0, "combo hold: still live");
 
 	// T10 cfg_toggle
 	$display("-- T10 cfg_toggle --");

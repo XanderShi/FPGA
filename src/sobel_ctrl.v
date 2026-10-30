@@ -1,12 +1,16 @@
 //======================================================================
-//  sobel_ctrl.v   按键控制: 阈值 / 算法模式 / 冻结 / 100帧回放
+//  sobel_ctrl.v   按键控制: 阈值 / 显示画面 / 冻结 / 100帧回放
 //
 //   K1 短按 : 实时/冻结模式 阈值 -8;  回放模式 上一帧
 //   K2 短按 : 实时/冻结模式 阈值 +8;  回放模式 下一帧
 //   K1 长按(0.8s) : 实时 -> 冻结(画面定格在按下沿那一帧) / 冻结 -> 实时
 //                   回放 -> 实时
 //   K2 长按(0.8s) : 实时/冻结 -> 回放(从最新一帧开始) / 回放 -> 实时
-//   K1+K2 同时按   : 算法模式循环 2(Canny+识别) -> 0(Sobel) -> 1(Canny) -> 2
+//   K1+K2 同时按   : 显示画面循环 0 -> 1 -> 2 -> 0
+//                   0 左彩色原图 / 右 Canny 二值边缘 (上电默认)
+//                   1 全屏 Canny 二值边缘
+//                   2 全屏彩色原图
+//   算法模式固定为 MODE_DEFAULT (Canny + 目标识别), 不再由组合键切换
 //
 //   按键低有效, 两级同步 + 20ms 消抖
 //   长按触发点在按住 0.8s 时; 冻结帧的槽号在"按下沿"就锁存, 所以定格的
@@ -30,6 +34,7 @@ module sobel_ctrl #(
 	input              frames_ready,	// 至少有一帧(回放用)
 	output reg  [10:0] threshold,
 	output reg  [1:0]  mode,			// 算法: 0 Sobel 1 Canny 2 Canny+识别
+	output reg  [1:0]  view_mode,		// 显示画面: 0 左彩右二值 1 全屏二值 2 全屏彩色
 	output reg         cfg_toggle,
 	output reg  [1:0]  disp_mode,		// 显示: 0 实时 1 冻结 2 回放
 	output reg         freeze_enter,
@@ -157,11 +162,18 @@ module sobel_ctrl #(
 			threshold <= (threshold < (THR_MAX - THR_STEP)) ? (threshold + THR_STEP) : THR_MAX;
 
 //----------------------------------------------------------------------
-// 算法模式 (K1+K2)
+// 算法模式: 固定 Canny + 识别, 不随组合键变化
 //----------------------------------------------------------------------
 	always @(posedge clk or negedge rst_n)
 		if(!rst_n) mode <= MODE_DEFAULT;
-		else if(combo_hit) mode <= (mode==2'd2) ? 2'd0 : (mode + 1'b1);
+
+//----------------------------------------------------------------------
+// 显示画面模式 (K1+K2): 0 左彩右二值 -> 1 全屏二值 -> 2 全屏彩色 -> 0
+// combo_hit 是两键都按住的那一刻的单拍脉冲, 按住期间不会重复切换
+//----------------------------------------------------------------------
+	always @(posedge clk or negedge rst_n)
+		if(!rst_n) view_mode <= 2'd0;
+		else if(combo_hit) view_mode <= (view_mode==2'd2) ? 2'd0 : (view_mode + 1'b1);
 
 //----------------------------------------------------------------------
 // 显示模式 / 冻结 / 回放
@@ -214,18 +226,21 @@ module sobel_ctrl #(
 //----------------------------------------------------------------------
 	reg [10:0] thr_d;
 	reg [1:0]  mode_d;
+	reg [1:0]  view_d;
 	reg        chg,chg1,chg2,chg3;
 	reg [4:0]  pwr_cnt;
 
 	always @(posedge clk or negedge rst_n)
 		if(!rst_n) begin
-			thr_d<=THR_DEFAULT; mode_d<=MODE_DEFAULT;
+			thr_d<=THR_DEFAULT; mode_d<=MODE_DEFAULT; view_d<=2'd0;
 			chg<=1'b0; chg1<=1'b0; chg2<=1'b0; chg3<=1'b0;
 			pwr_cnt<=5'd0;
 		end else begin
 			thr_d <= threshold;
 			mode_d<= mode;
-			chg   <= (thr_d!=threshold) || (mode_d!=mode) || (pwr_cnt==5'd15);
+			view_d<= view_mode;
+			chg   <= (thr_d!=threshold) || (mode_d!=mode) || (view_d!=view_mode) ||
+			         (pwr_cnt==5'd15);
 			chg1  <= chg;
 			chg2  <= chg1;
 			chg3  <= chg2;
