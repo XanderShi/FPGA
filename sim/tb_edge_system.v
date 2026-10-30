@@ -75,18 +75,27 @@ module tb_edge_system;
 		.pk_valid(pk_valid), .pk_sop(pk_sop), .pk_eop(pk_eop), .pk_edge(pk_edge),
 		.pk_rgb(pk_rgb), .pk_gray(pk_gray));
 
-	wire [1:0] shp; wire [10:0] bx0, bx1; wire [9:0] by0, by1;
-	wire [23:0] fe, fa; wire [15:0] fr; wire frv;
+	wire [3:0] shp_cnt;
+	wire [4*80-1:0] shp_bus;
+	wire frv;
+	// 目标 0 的字段 (打包格式见 shape_recognizer 头注释)
+	wire [1:0]  shp = shp_bus[1:0];
+	wire [10:0] bx0 = shp_bus[2  +: 11];
+	wire [10:0] bx1 = shp_bus[13 +: 11];
+	wire [9:0]  by0 = shp_bus[24 +: 10];
+	wire [9:0]  by1 = shp_bus[34 +: 10];
+	wire [15:0] fr  = shp_bus[44 +: 16];
+	wire [19:0] fe  = shp_bus[60 +: 20];
 	shape_recognizer #(
-		.H_ACTIVE(W), .V_ACTIVE(H), .XW(11), .YW(10), .CW(24),
-		.MIN_EDGE(24'd400), .RECT_Q(16'd230), .CIRC_Q(16'd168), .TRI_Q(16'd96),
-		.ROI_X0(400), .ROI_X1(879), .ROI_Y0(16), .ROI_Y1(H-17)	// 宽度 480, 高度随仿真画面缩小
+		.H_ACTIVE(W), .V_ACTIVE(H), .XW(11), .YW(10), .CW(20),
+		.MIN_EDGE(20'd400), .RECT_Q(16'd230), .CIRC_Q(16'd168), .TRI_Q(16'd96),
+		.ROI_X0(400), .ROI_X1(879), .ROI_Y0(16), .ROI_Y1(H-17),	// 宽度 480, 高度随仿真画面缩小
+		.MAX_TARGETS(4), .MAX_LABEL(63), .LBW(6), .TCNT_W(4), .TBW(80)
 	) u_shape (
 		.clk(clk), .rst_n(rst_n),
 		.st_sop(pk_sop), .st_eop(pk_eop), .st_valid(pk_valid), .st_data({8{pk_edge}}),
-		.thresh(8'h80), .roi_en(1'b1),
-		.shape(shp), .box_x0(bx0), .box_x1(bx1), .box_y0(by0), .box_y1(by1),
-		.feat_edge(fe), .feat_area(fa), .feat_ratio_q(fr), .result_valid(frv));
+		.thresh(8'h80),
+		.target_count(shp_cnt), .targets(shp_bus), .result_valid(frv));
 
 	// ---------------- 测试图 ----------------
 	reg [15:0] img [0:NFRAME-1][0:N-1];
@@ -204,8 +213,8 @@ module tb_edge_system;
 	// 识别结果: 第 r 个 result_valid 对应输出帧 r
 	always @(posedge clk) if (frv) begin
 		if (IMG == 1 && nres >= 1 && nres < NFRAME) begin
-			$display("  out frame %0d: shape=%0d (expect %0d)  ratio_q=%0d edge=%0d area=%0d box=(%0d,%0d)-(%0d,%0d)",
-			         nres, shp, fshape[nres], fr, fe, fa, bx0, by0, bx1, by1);
+			$display("  out frame %0d: targets=%0d shape0=%0d (expect %0d)  ratio_q=%0d edge=%0d box=(%0d,%0d)-(%0d,%0d)",
+			         nres, shp_cnt, shp, fshape[nres], fr, fe, bx0, by0, bx1, by1);
 			if (shp != fshape[nres]) shape_err = shape_err + 1;
 		end
 		nres = nres + 1;

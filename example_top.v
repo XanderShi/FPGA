@@ -1139,31 +1139,37 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 	wire [31:0] wframe_pack = {pk_sop, pk_eop, 6'h00, gray_dly, wraw_pix};
 
 	////////////////////////////////////////////////////////////////
-	//	【高阶挑战6】简易目标识别 (模块: src/shape/, 原作者 梁雅萱, lyx 分支)
-	//	在写入 DDR 的同一路边缘流上做单遍几何特征统计(包围盒/周长/扫描线填充面积),
-	//	帧末按填充率分类: 矩形≈1.0 圆≈0.785 三角形≈0.5。坐标即 DDR/屏幕坐标, 显示端可直接画框。
+	//	【高阶挑战3】多目标识别 (模块: src/shape/)
+	//	在写入 DDR 的同一路边缘流上做逐像素连通域标记(行缓存 + 根表并查),
+	//	每个连通域独立统计包围盒/边缘数/扫描线填充面积, 帧末按填充率分类:
+	//	矩形≈1.0 圆≈0.785 三角形≈0.5。一帧最多同时输出 4 个目标。
+	//	坐标即 DDR/屏幕坐标, 显示端可直接画框。
 	//	识别始终在跑(用当前模式选中的边缘), 叠加显示只在模式 2 打开。
 	////////////////////////////////////////////////////////////////
-	wire [1:0]  shp_shape;
-	wire [10:0] shp_x0, shp_x1;
-	wire [9:0]  shp_y0, shp_y1;
-	wire [23:0] shp_edge_cnt, shp_area;
-	wire [15:0] shp_ratio;
+	localparam MAX_TARGETS = 4;
+	localparam SHP_TBW     = 80;			// 单目标结果位宽: 2+11+11+10+10+16+20
+	wire [3:0]  shp_count;
+	wire [MAX_TARGETS*SHP_TBW-1:0] shp_targets;
 	wire        shp_rvalid;
 	shape_recognizer #(
-		.H_ACTIVE (1280),
-		.V_ACTIVE (720),
-		.XW       (11),
-		.YW       (10),
-		.CW       (24),
-		.MIN_EDGE (24'd400),		//ROI 内边缘像素少于此数判"未识别"
-		.RECT_Q   (16'd230),		//填充率 >= 0.90 -> 矩形
-		.CIRC_Q   (16'd168),		//填充率 >= 0.66 -> 圆形
-		.TRI_Q    (16'd96),			//填充率 >= 0.38 -> 三角形
-		.ROI_X0   (400),			//只统计画面正中 480x360, 排除背景杂波
-		.ROI_X1   (879),
-		.ROI_Y0   (180),
-		.ROI_Y1   (539)
+		.H_ACTIVE    (1280),
+		.V_ACTIVE    (720),
+		.XW          (11),
+		.YW          (10),
+		.CW          (20),
+		.MIN_EDGE    (20'd400),		//每个目标边缘像素少于此数判"未识别"
+		.RECT_Q      (16'd230),		//填充率 >= 0.90 -> 矩形
+		.CIRC_Q      (16'd168),		//填充率 >= 0.66 -> 圆形
+		.TRI_Q       (16'd96),			//填充率 >= 0.38 -> 三角形
+		.ROI_X0      (400),			//只统计画面正中 480x360, 排除背景杂波
+		.ROI_X1      (879),
+		.ROI_Y0      (180),
+		.ROI_Y1      (539),
+		.MAX_TARGETS (MAX_TARGETS),
+		.MAX_LABEL   (63),			//内部候选连通域上限(上限之外的游程直接丢弃)
+		.LBW         (6),
+		.TCNT_W      (4),
+		.TBW         (SHP_TBW)
 	) u_shape_recognizer (
 		.clk          (w_cmos_pclk  ),
 		.rst_n        (rstn_sys     ),
@@ -1172,15 +1178,8 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 		.st_valid     (pk_valid     ),
 		.st_data      ({8{pk_edge}} ),	//已是二值边缘, 扩成 0x00/0xFF
 		.thresh       (8'h80        ),
-		.roi_en       (1'b1         ),
-		.shape        (shp_shape    ),
-		.box_x0       (shp_x0       ),
-		.box_x1       (shp_x1       ),
-		.box_y0       (shp_y0       ),
-		.box_y1       (shp_y1       ),
-		.feat_edge    (shp_edge_cnt ),
-		.feat_area    (shp_area     ),
-		.feat_ratio_q (shp_ratio    ),
+		.target_count (shp_count    ),
+		.targets      (shp_targets  ),
 		.result_valid (shp_rvalid   )
 	);
 	
@@ -1339,33 +1338,28 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 	                                      : lcd_live);
 
 	////////////////////////////////////////////////////////////////
-	//	【高阶挑战6】识别结果 跨时钟域(w_cmos_pclk -> clk_pixel) + 屏幕叠加
-	//	结果每帧只更新一次且保持一整帧, 用电平翻转握手传递
+	//	【高阶挑战3】识别结果 跨时钟域(w_cmos_pclk -> clk_pixel) + 屏幕叠加
+	//	结果每帧只更新一次且保持一整帧, 目标数与整条目标结果总线共用一次
+	//	电平翻转握手整体搬运 (target_count = 0 也会搬运, 不会残留旧目标)
 	////////////////////////////////////////////////////////////////
-	wire [1:0]  disp_shape;
-	wire [10:0] disp_x0, disp_x1;
-	wire [9:0]  disp_y0, disp_y1;
-	wire [15:0] disp_ratio;
+	wire [3:0]  disp_count;
+	wire [MAX_TARGETS*SHP_TBW-1:0] disp_targets;
 	wire        disp_svalid;
-	shape_result_cdc #(.XW(11), .YW(10)) u_shape_result_cdc (
-		.clk_a   (w_cmos_pclk ),
-		.rst_a_n (rstn_sys    ),
-		.load    (shp_rvalid  ),
-		.shape_a (shp_shape   ),
-		.x0_a    (shp_x0      ),
-		.x1_a    (shp_x1      ),
-		.y0_a    (shp_y0      ),
-		.y1_a    (shp_y1      ),
-		.ratio_a (shp_ratio   ),
-		.clk_b   (clk_pixel   ),
-		.rst_b_n (rstn_pixel  ),
-		.shape_b (disp_shape  ),
-		.x0_b    (disp_x0     ),
-		.x1_b    (disp_x1     ),
-		.y0_b    (disp_y0     ),
-		.y1_b    (disp_y1     ),
-		.ratio_b (disp_ratio  ),
-		.valid_b (disp_svalid )
+	shape_result_cdc #(
+		.MAX_TARGETS (MAX_TARGETS),
+		.TBW         (SHP_TBW),
+		.TCNT_W      (4)
+	) u_shape_result_cdc (
+		.clk_a     (w_cmos_pclk ),
+		.rst_a_n   (rstn_sys    ),
+		.load      (shp_rvalid  ),
+		.count_a   (shp_count   ),
+		.targets_a (shp_targets ),
+		.clk_b     (clk_pixel   ),
+		.rst_b_n   (rstn_pixel  ),
+		.count_b   (disp_count  ),
+		.targets_b (disp_targets),
+		.valid_b   (disp_svalid )
 	);
 	//	算法固定 Canny+识别(sobel_mode_sys 恒为 2), 实时显示才叠加目标框/标签:
 	//	模式是准静态电平, 两级同步即可
@@ -1376,25 +1370,29 @@ wire        edge_bit = (sobel_mode_pclk == 2'd0) ? sobel_bit : canny_bit;
 	wire        ov_en = ov_en_sync[1] & live_sync[1];
 	wire [23:0] lcd_ov;
 	shape_overlay #(
-		.S         (2),		//文字放大 2 倍, 每个汉字 32x32
-		.X_SHIFT   (0),		//FWFT 读 FIFO, lcd_xpos 已等于图像列号(lyx 原版取 1 会偏一列)
-		.LABEL_X   (24),
-		.LABEL_Y   (24),
-		.BOX_THICK (2)
+		.S           (2),		//文字放大 2 倍, 每个汉字 32x32
+		.X_SHIFT     (0),		//FWFT 读 FIFO, lcd_xpos 已等于图像列号(lyx 原版取 1 会偏一列)
+		.LABEL_X     (24),
+		.LABEL_Y     (24),
+		.BOX_THICK   (2),
+		.MAX_TARGETS (MAX_TARGETS),
+		.TBW         (SHP_TBW),
+		.XW          (11),
+		.YW          (10),
+		.TCNT_W      (4),
+		.H_ACTIVE    (1280),
+		.V_ACTIVE    (720)
 	) u_shape_overlay (
-		.clk   (clk_pixel   ),
-		.rst_n (rstn_pixel  ),
-		.de    (lcd_request & ov_en),
-		.xpos  (lcd_xpos    ),
-		.ypos  (lcd_ypos    ),
-		.base  (lcd_pixel   ),
-		.shape (disp_shape  ),
-		.bx0   ({1'b0, disp_x0}),
-		.bx1   ({1'b0, disp_x1}),
-		.by0   ({2'b0, disp_y0}),
-		.by1   ({2'b0, disp_y1}),
-		.valid (disp_svalid ),
-		.rgb   (lcd_ov      )
+		.clk          (clk_pixel   ),
+		.rst_n        (rstn_pixel  ),
+		.de           (lcd_request & ov_en),
+		.xpos         (lcd_xpos    ),
+		.ypos         (lcd_ypos    ),
+		.base         (lcd_pixel   ),
+		.target_count (disp_count  ),
+		.targets      (disp_targets),
+		.valid        (disp_svalid ),
+		.rgb          (lcd_ov      )
 	);
 	wire 	[7:0] 	lcd_data_r = lcd_ov[23:16];
 	wire 	[7:0] 	lcd_data_g = lcd_ov[15:8];

@@ -11,7 +11,7 @@ set SRC=..\src\Sobeledge_8d\hdl
 set GRAY=..\src\vip_rgb2gray\hdl
 
 vlib work
-vlog -work work +incdir+..\src %SRC%\shift_regs.v %SRC%\extract_region_c_shiftram_xtap.v %SRC%\Sobeledge_matrix_3x3.v %SRC%\Sobeledge_proc.v ..\src\sobel_ctrl.v ..\src\median_3x3.v ..\src\canny\canny_edge.v ..\src\rgb_align_ring.v ..\src\frame_store.v ..\src\shape\shape_recognizer.v ..\src\shape\shape_overlay.v ..\src\shape\font_cn_rom.v ..\src\lcd_driver.v %GRAY%\vip_rgb2gray_proc.v %GRAY%\vip_rgb2gray_mult.v %GRAY%\vip_rgb2gray_shift_regs.v %GRAY%\multiplier_unsigned_16x16_pp.v ref\ref_shiftram_xtap.v tb_Sobeledge_8d_proc.v tb_sobel_ctrl.v tb_median_3x3.v tb_linebuf_equiv.v tb_matrix_gap.v tb_pipeline_latency.v tb_canny_edge.v tb_shape_recognizer.v tb_edge_system.v tb_display_overlay.v tb_frame_store.v tb_view_mode.v
+vlog -work work +incdir+..\src %SRC%\shift_regs.v %SRC%\extract_region_c_shiftram_xtap.v %SRC%\Sobeledge_matrix_3x3.v %SRC%\Sobeledge_proc.v ..\src\sobel_ctrl.v ..\src\median_3x3.v ..\src\canny\canny_edge.v ..\src\rgb_align_ring.v ..\src\frame_store.v ..\src\shape\shape_recognizer.v ..\src\shape\shape_result_cdc.v ..\src\shape\shape_overlay.v ..\src\shape\font_cn_rom.v ..\src\lcd_driver.v %GRAY%\vip_rgb2gray_proc.v %GRAY%\vip_rgb2gray_mult.v %GRAY%\vip_rgb2gray_shift_regs.v %GRAY%\multiplier_unsigned_16x16_pp.v ref\ref_shiftram_xtap.v tb_Sobeledge_8d_proc.v tb_sobel_ctrl.v tb_median_3x3.v tb_linebuf_equiv.v tb_matrix_gap.v tb_pipeline_latency.v tb_canny_edge.v tb_shape_recognizer.v tb_edge_system.v tb_display_overlay.v tb_frame_store.v tb_view_mode.v
 
 if errorlevel 1 goto compile_error
 
